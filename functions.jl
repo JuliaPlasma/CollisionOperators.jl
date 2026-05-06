@@ -74,7 +74,7 @@ end
 function compute_collision!(dot_v, v_parts, w_parts, G)
     fill!(dot_v, 0.0)
     N = size(v_parts, 1)
-    for γ in 1:N
+    Threads.@threads for γ in 1:N
         vγ1, vγ2 = v_parts[γ, 1], v_parts[γ, 2]
         (vγ1 <= V_MIN || vγ1 >= V_MAX || vγ2 <= V_MIN || vγ2 >= V_MAX) && continue
         Gγ1, Gγ2 = G[γ, 1], G[γ, 2]
@@ -91,9 +91,12 @@ function compute_collision!(dot_v, v_parts, w_parts, G)
             dist2 < 1e-24 && continue
             dist = sqrt(dist2)
 
-            # g = G_γ - G_α
-            g1 = Gγ1 - G[α, 1]
-            g2 = Gγ2 - G[α, 2]
+            # g = G_α - G_γ.  Landau metriplectic ODE:
+            #   dv_γ/dt = ∑_α w_α A(v_γ−v_α) (G_α − G_γ),
+            # equivalently −∑_α w_α A(v_γ−v_α) (G_γ − G_α). The minus sign is
+            # required by the H-theorem dS/dt ≥ 0 since ∂S/∂v_γ = −w_γ G_γ.
+            g1 = G[α, 1] - Gγ1
+            g2 = G[α, 2] - Gγ2
 
             # [U·g]_i = (g_i - Δv̂_i (Δv̂·g)) / |Δv|
             dv_dot_g = (d1 * g1 + d2 * g2) / dist2    # (Δv·g) / |Δv|²

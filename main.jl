@@ -88,7 +88,7 @@ function main()
     # ------------------------------------------------------------------
     # Save conservation histories to CSV
     # ------------------------------------------------------------------
-    open("conservation_history_euler.csv", "w") do io
+    open("conservation_history_FE.csv", "w") do io
         println(io, "step,time,entropy,energy,momentum_1,momentum_2")
         for n in 0:N_STEPS
             t  = n * DT
@@ -99,7 +99,22 @@ function main()
             println(io, "$n,$t,$S,$E,$P1,$P2")
         end
     end
-    println("Saved conservation_history_euler.csv")
+    println("Saved conservation_history_FE.csv")
+
+    # ------------------------------------------------------------------
+    # Save particle snapshots (v_1, v_2 per particle) at each quarter
+    # ------------------------------------------------------------------
+    open("particle_snapshots_FE.csv", "w") do io
+        println(io, "step,time,particle_idx,v1,v2")
+        for s in sort(collect(keys(snapshots)))
+            pts = snapshots[s]
+            t   = s * DT
+            for i in axes(pts, 1)
+                println(io, "$s,$t,$i,$(pts[i, 1]),$(pts[i, 2])")
+            end
+        end
+    end
+    println("Saved particle_snapshots_FE.csv")
 
     begin # Visualization
         E0    = energy_history[1]
@@ -116,22 +131,38 @@ function main()
 
         fig = Figure(; size=(1200, 200 * (n_snap_rows + 3)))
 
+        # Sample standard deviations σ_d = sqrt(⟨v_d²⟩ − ⟨v_d⟩²) per snapshot;
+        # annotate the initial and final scatters with σ₁, σ₂ to visualize
+        # anisotropy collapse toward the isotropic Maxwellian.
+        sample_std(v) = (μ = sum(v)/length(v); sqrt(sum((v .- μ).^2)/length(v)))
+        s_init  = snap_keys[1]
+        s_final = snap_keys[end]
         for (idx, s) in enumerate(snap_keys)
             row, col = fldmod1(idx, 2)
-            ax = Axis(fig[row, col];
-                title="t = $(round(s * DT; digits=4))",
-                xlabel="v₁", ylabel="v₂", aspect=DataAspect())
+            t_str = round(s * DT; digits=4)
             pts = snapshots[s]
+            title_str = if s == s_init || s == s_final
+                σ1 = sample_std(@view pts[:, 1])
+                σ2 = sample_std(@view pts[:, 2])
+                "t = $t_str   σ₁=$(round(σ1; digits=4))   σ₂=$(round(σ2; digits=4))"
+            else
+                "t = $t_str"
+            end
+            ax = Axis(fig[row, col];
+                title=title_str,
+                xlabel="v₁", ylabel="v₂", aspect=DataAspect())
             scatter!(ax, pts[:, 1], pts[:, 2]; markersize=2, color=:blue, alpha=0.3)
             xlims!(ax, V_MIN, V_MAX)
             ylims!(ax, V_MIN, V_MAX)
         end
 
-        # H-function evolution: H_h = -S_h (Boltzmann H-theorem: dH/dt ≤ 0)
-        H_history = -entropy_history
+        # H-function evolution (sign convention: H_h is the entropy functional
+        # we expect to grow monotonically; the standard Boltzmann H = ∫ f log f
+        # has the opposite sign and would decrease).
+        H_history = entropy_history
         ax_H = Axis(fig[n_snap_rows+1, 1:2];
-            xlabel="time step", ylabel="H_h = -S_h",
-            title="Boltzmann H-function (should increase monotonically)")
+            xlabel="time step", ylabel="H_h",
+            title="Boltzmann H-function (monotone increase expected)")
         lines!(ax_H, steps, H_history; color=:red, linewidth=2)
 
         # Energy conservation error (log scale)

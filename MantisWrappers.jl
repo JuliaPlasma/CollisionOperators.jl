@@ -18,7 +18,10 @@ include("parameters.jl")
 # The 0-form space X⁰ represents scalar fields f(v₁, v₂) = Σᵢ fᵢ φᵢ(v).
 
 begin # Geometry and function spaces
-    const bp = [V_MIN, LinRange(I_MIN, I_MAX, N_ELEM + 1)..., V_MAX]
+    # Non-uniform mesh: N_ELEM uniform inner elements covering [I_MIN, I_MAX]
+    # plus one outer (coarse) element on each side reaching out to V_MIN / V_MAX.
+    # Total elements per dim = N_ELEM + 2.
+    const bp = collect(Float64, vcat(V_MIN, range(I_MIN, I_MAX; length=N_ELEM + 1), V_MAX))
 
     const geo_1d = Geometry.CartesianGeometry((bp,))
     const B_1d = FunctionSpaces.BSplineSpace(geo_1d, P_DEG, K_REG)
