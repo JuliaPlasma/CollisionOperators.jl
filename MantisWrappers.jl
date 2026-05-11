@@ -1,151 +1,198 @@
 # # MantisWrappers
 #
-# This module wraps the Mantis FEM library to provide a convenient interface for
-# particle-to-B-spline projection, entropy computation, and Landau collision operators
-# on a 2D Cartesian velocity domain.
+# Wraps the Mantis FEM library for particle-to-B-spline projection, entropy
+# computation, and Landau collision operators on a 2D Cartesian velocity
+# domain.
+#
+# Refactored to hold all FEM state in a single `Workspace` struct constructed
+# from a `SimParameters` instance. No module-level globals depend on
+# parameters.
 
 module MantisWrappers
 
 using Mantis
 using LinearAlgebra
-using LinearAlgebra: mul!
+using LinearAlgebra: mul!, lu
 
-include("parameters.jl")
+# `SimParameters` is defined in Parameters.jl, included by main_Gonzalez.jl
+# *before* this module is loaded. We forward-declare via a parameter alias so
+# Workspace can reference the type without re-including the file.
+include("Parameters.jl")
 
-# ## Geometry and function spaces
+# ## Bézier-extraction scratch buffers (per dimension, sized by P_DEG)
+struct ParticleBuf
+    B::Vector{Float64}
+    dB::Vector{Float64}
+    phi::Vector{Float64}
+    dphi::Vector{Float64}
+end
+ParticleBuf(p_deg::Int) = ParticleBuf(zeros(p_deg+1), zeros(p_deg+1),
+                                       zeros(p_deg+1), zeros(p_deg+1))
+
+# ## Workspace
 #
-# We build a 2D tensor-product B-spline space on the velocity domain [V_MIN, V_MAX]².
-# The 0-form space X⁰ represents scalar fields f(v₁, v₂) = Σᵢ fᵢ φᵢ(v).
+# Holds geometry, function spaces, mass-matrix LU, quadrature rule, Bézier
+# extraction caches, and per-particle / per-DOF scratch arrays. One instance
+# is built per simulation run.
+mutable struct Workspace
+    # Parameters echoed for convenience (so functions don't need both args)
+    p::SimParameters
 
-begin # Geometry and function spaces
-    # Non-uniform mesh: N_ELEM uniform inner elements covering [I_MIN, I_MAX]
-    # plus one outer (coarse) element on each side reaching out to V_MIN / V_MAX.
-    # Total elements per dim = N_ELEM + 2.
-    const bp = collect(Float64, vcat(V_MIN, range(I_MIN, I_MAX; length=N_ELEM + 1), V_MAX))
+    # Anisotropic breakpoint vectors (length n_elem_d + 1)
+    bp1::Vector{Float64}
+    bp2::Vector{Float64}
 
-    const geo_1d = Geometry.CartesianGeometry((bp,))
-    const B_1d = FunctionSpaces.BSplineSpace(geo_1d, P_DEG, K_REG)
-    const TP = FunctionSpaces.TensorProductSpace((B_1d, B_1d), Geometry.CartesianGeometry)
-    const X⁰ = Forms.FormSpace(0, TP, "f")
+    # Function-space objects
+    geo_2d
+    X⁰
+    n_dofs::Int
+    n_elements::Int
+    lin_indices::LinearIndices{2, Tuple{Base.OneTo{Int}, Base.OneTo{Int}}}
 
-    const n_dofs = Forms.get_num_basis(X⁰) # number of basis functions (degrees of freedom)
-    const geo_2d = Forms.get_geometry(X⁰)
-    const n_elements = Geometry.get_num_elements(geo_2d)
-    const lin_indices = LinearIndices((length(bp)-1, length(bp)-1))
+    # Mass-matrix LU factorization
+    M_lu
+
+    # Quadrature rule for entropy / r-vector integration
+    qrule_integrate
+
+    # Bézier extraction cache, per dimension
+    ext1d_1::Vector
+    ext1d_2::Vector
+    basis_start_1d_1::Vector{Int}
+    basis_start_1d_2::Vector{Int}
+    n_dofs_1d_1::Int
+    n_dofs_1d_2::Int
+    lin_dofs_2d::LinearIndices{2, Tuple{Base.OneTo{Int}, Base.OneTo{Int}}}
+
+    # Per-particle scratch (single-threaded — locate_particle / l2_project /
+    # compute_G! all run serial; compute_collision! threads but doesn't touch
+    # the spline machinery)
+    pbuf1::ParticleBuf
+    pbuf2::ParticleBuf
+    lp_vals::Vector{Float64}
+    lp_gids::Vector{Int}
+    G_vals::Vector{Float64}
+    G_dxi1::Vector{Float64}
+    G_dxi2::Vector{Float64}
+    G_gids::Vector{Int}
 end
 
-# ## Mass matrix assembly
-#
-# The mass matrix M_{ij} = ∫ φᵢ φⱼ dv is assembled using the Mantis weak-form pipeline.
-# We use a zero forcing term (AnalyticalFormField) as a dummy — only the bilinear form
-# ∫ v⁰ ∧ ★(u⁰) is needed. The LU factorization is stored for repeated solves.
+"""
+    build_workspace(p::SimParameters)
 
-const M_lu = let
-    qrule = Quadrature.tensor_product_rule((P_DEG + 1, P_DEG + 1), Quadrature.gauss_legendre)
-    dΩ = Quadrature.StandardQuadrature(qrule, n_elements)
-    f_zero = Forms.AnalyticalFormField(0, x -> [zeros(size(x, 1))], geo_2d, "0")
-    wfi = Assemblers.WeakFormInputs(X⁰, f_zero)
-    v⁰ = Assemblers.get_test_form(wfi)
-    u⁰ = Assemblers.get_trial_form(wfi)
-    M_expr = ∫(v⁰ ∧ ★(u⁰), dΩ)
-    M_wf = Assemblers.WeakForm(((M_expr,),), ((0,),), wfi)
-    M, _ = Assemblers.assemble(M_wf)
-    lu(M)
+Construct geometry, function space, mass matrix, quadrature, and all
+preallocated scratch from the configuration `p`. Each velocity dimension gets
+its own anisotropic uniform mesh covering [V_MIN, V_MAX]:
+  bp_d = range(V_MIN, V_MAX; length=N_ELEM_d + 1)
+
+(This worktree is the *anisotropic uniform* configuration — no inner/outer
+breakpoint jump. If you want the old non-uniform mesh, replace bp_d below.)
+"""
+function build_workspace(p::SimParameters)
+    bp1 = collect(Float64, range(p.V_MIN, p.V_MAX; length=p.N_ELEM_1 + 1))
+    bp2 = collect(Float64, range(p.V_MIN, p.V_MAX; length=p.N_ELEM_2 + 1))
+
+    geo_1d_1 = Geometry.CartesianGeometry((bp1,))
+    geo_1d_2 = Geometry.CartesianGeometry((bp2,))
+    B_1d_1   = FunctionSpaces.BSplineSpace(geo_1d_1, p.P_DEG, p.K_REG)
+    B_1d_2   = FunctionSpaces.BSplineSpace(geo_1d_2, p.P_DEG, p.K_REG)
+    TP       = FunctionSpaces.TensorProductSpace((B_1d_1, B_1d_2),
+                                                  Geometry.CartesianGeometry)
+    X⁰       = Forms.FormSpace(0, TP, "f")
+
+    n_dofs     = Forms.get_num_basis(X⁰)
+    geo_2d     = Forms.get_geometry(X⁰)
+    n_elements = Geometry.get_num_elements(geo_2d)
+    lin_indices = LinearIndices((length(bp1)-1, length(bp2)-1))
+
+    # Mass matrix M_{ij} = ∫ φᵢ φⱼ dv
+    M_lu = let
+        qrule = Quadrature.tensor_product_rule((p.P_DEG + 1, p.P_DEG + 1),
+                                                Quadrature.gauss_legendre)
+        dΩ = Quadrature.StandardQuadrature(qrule, n_elements)
+        f_zero = Forms.AnalyticalFormField(0, x -> [zeros(size(x, 1))], geo_2d, "0")
+        wfi = Assemblers.WeakFormInputs(X⁰, f_zero)
+        v⁰ = Assemblers.get_test_form(wfi)
+        u⁰ = Assemblers.get_trial_form(wfi)
+        M_expr = ∫(v⁰ ∧ ★(u⁰), dΩ)
+        M_wf = Assemblers.WeakForm(((M_expr,),), ((0,),), wfi)
+        M, _ = Assemblers.assemble(M_wf)
+        lu(M)
+    end
+
+    qrule_integrate = Quadrature.tensor_product_rule((p.N_QUAD, p.N_QUAD),
+                                                       Quadrature.gauss_legendre)
+
+    # Bézier extraction per 1D element, per dimension
+    n_elem_1 = length(bp1) - 1
+    n_elem_2 = length(bp2) - 1
+    ext1d_1 = [FunctionSpaces.get_extraction(B_1d_1, e, 1)[1] for e in 1:n_elem_1]
+    ext1d_2 = [FunctionSpaces.get_extraction(B_1d_2, e, 1)[1] for e in 1:n_elem_2]
+    basis_start_1d_1 = [first(FunctionSpaces.get_basis_indices(B_1d_1, e)) for e in 1:n_elem_1]
+    basis_start_1d_2 = [first(FunctionSpaces.get_basis_indices(B_1d_2, e)) for e in 1:n_elem_2]
+    n_dofs_1d_1 = FunctionSpaces.get_num_basis(B_1d_1)
+    n_dofs_1d_2 = FunctionSpaces.get_num_basis(B_1d_2)
+    lin_dofs_2d = LinearIndices((n_dofs_1d_1, n_dofs_1d_2))
+
+    # Scratch
+    pbuf1 = ParticleBuf(p.P_DEG)
+    pbuf2 = ParticleBuf(p.P_DEG)
+    nloc = (p.P_DEG + 1)^2
+    lp_vals = zeros(nloc)
+    lp_gids = zeros(Int, nloc)
+    G_vals  = zeros(nloc)
+    G_dxi1  = zeros(nloc)
+    G_dxi2  = zeros(nloc)
+    G_gids  = zeros(Int, nloc)
+
+    return Workspace(p, bp1, bp2,
+                     geo_2d, X⁰, n_dofs, n_elements, lin_indices,
+                     M_lu, qrule_integrate,
+                     ext1d_1, ext1d_2,
+                     basis_start_1d_1, basis_start_1d_2,
+                     n_dofs_1d_1, n_dofs_1d_2, lin_dofs_2d,
+                     pbuf1, pbuf2,
+                     lp_vals, lp_gids,
+                     G_vals, G_dxi1, G_dxi2, G_gids)
 end
-
-# ## Quadrature rule for integration
-#
-# A separate quadrature rule used for numerical integration of entropy and the r-vector.
-
-const _qrule_integrate = Quadrature.tensor_product_rule((N_QUAD, N_QUAD), Quadrature.gauss_legendre)
 
 # ## Particle location
-#
-# Given a particle at (v₁, v₂), find which element it belongs to and compute the
-# reference (canonical) coordinates ξ ∈ [0,1]² within that element.
-
 struct ParticleLocation
     elem_id::Int
     xi::Points.CartesianPoints
-    h1::Float64   # element width in v₁ direction
-    h2::Float64   # element width in v₂ direction
+    h1::Float64
+    h2::Float64
 end
 
-function locate_particle(v1, v2)
-    (v1 <= V_MIN || v1 >= V_MAX || v2 <= V_MIN || v2 >= V_MAX) && return nothing # TODO: type instable
-    i = searchsortedlast(bp, v1)
-    j = searchsortedlast(bp, v2)
-    h1 = bp[i+1] - bp[i]
-    h2 = bp[j+1] - bp[j]
-    ξ1 = (v1 - bp[i]) / h1
-    ξ2 = (v2 - bp[j]) / h2
-    return ParticleLocation(lin_indices[i, j], Points.CartesianPoints(([ξ1], [ξ2])), h1, h2)
+function locate_particle(ws::Workspace, v1, v2)
+    p = ws.p
+    (v1 <= p.V_MIN || v1 >= p.V_MAX || v2 <= p.V_MIN || v2 >= p.V_MAX) && return nothing
+    i = searchsortedlast(ws.bp1, v1)
+    j = searchsortedlast(ws.bp2, v2)
+    h1 = ws.bp1[i+1] - ws.bp1[i]
+    h2 = ws.bp2[j+1] - ws.bp2[j]
+    ξ1 = (v1 - ws.bp1[i]) / h1
+    ξ2 = (v2 - ws.bp2[j]) / h2
+    return ParticleLocation(ws.lin_indices[i, j],
+                            Points.CartesianPoints(([ξ1], [ξ2])), h1, h2)
 end
 
-"""
-    evaluate(field_or_space, location)
+# ## Evaluation wrappers
+evaluate(ws::Workspace, ff::Forms.AbstractFormField, e::Int) =
+    Forms.evaluate(ff, e, ws.qrule_integrate.nodes)
+evaluate(ws::Workspace, fs::Forms.AbstractFormSpace, elem_id::Int) =
+    Forms.evaluate(fs, elem_id, ws.qrule_integrate.nodes)
+evaluate(ws::Workspace, e::Int) = evaluate(ws, ws.X⁰, e)
+evaluate(ws::Workspace, fs::Forms.AbstractFormSpace, loc::ParticleLocation) =
+    Forms.evaluate(fs, loc.elem_id, loc.xi)
+evaluate(ws::Workspace, ff::Forms.AbstractFormField, loc::ParticleLocation) =
+    Forms.evaluate(ff, loc.elem_id, loc.xi)
+evaluate(ws::Workspace, loc::ParticleLocation) = evaluate(ws, ws.X⁰, loc)
 
-Thin wrappers around Mantis evaluation routines.
+build_field(ws::Workspace, coeffs) = Forms.build_form_field(ws.X⁰, coeffs)
+element_measure(ws::Workspace, e) = Geometry.get_element_measure(ws.geo_2d, e)
 
-# Methods
-
-- `evaluate(ff::AbstractFormField, elem_id::Int)` — field values at quadrature nodes of element `elem_id`.
-- `evaluate(fs::AbstractFormSpace, elem_id::Int)` — basis values at quadrature nodes of element `elem_id`.
-- `evaluate(ff::AbstractFormField, loc::ParticleLocation)` — field values at particle position `loc`.
-- `evaluate(fs::AbstractFormSpace, loc::ParticleLocation)` — basis values at particle position `loc`.
-
-# Convenience (default to global coordinate space `X⁰`)
-
-- `evaluate(elem_id::Int)` — equivalent to `evaluate(X⁰, elem_id)`.
-- `evaluate(loc::ParticleLocation)` — equivalent to `evaluate(X⁰, loc)`.
-"""
-function evaluate end
-
-evaluate(ff::Forms.AbstractFormField, e::Int) = Forms.evaluate(ff, e, _qrule_integrate.nodes)
-
-evaluate(fs::Forms.AbstractFormSpace, elem_id::Int) = Forms.evaluate(fs, elem_id, _qrule_integrate.nodes)
-evaluate(e::Int) = evaluate(X⁰, e)
-
-evaluate(fs::Forms.AbstractFormSpace, loc::ParticleLocation) = Forms.evaluate(fs, loc.elem_id, loc.xi)
-evaluate(ff::Forms.AbstractFormField, loc::ParticleLocation) = Forms.evaluate(ff, loc.elem_id, loc.xi)
-evaluate(loc::ParticleLocation) = evaluate(X⁰, loc)
-
-# Evaluate basis function derivatives in canonical coordinates.
-# Returns local_basis[deriv_order+1][deriv_index][component][point, basis].
-# For a 2D 0-form: local_basis[2][1][1] = ∂φ/∂ξ₁, local_basis[2][2][1] = ∂φ/∂ξ₂.
-
-evaluate_basis_derivatives(elem_id::Int, xi, nderivatives) =
-    Forms._evaluate_form_in_canonical_coordinates(X⁰, elem_id, xi, nderivatives)
-evaluate_basis_derivatives(loc::ParticleLocation, nderivatives) =
-    Forms._evaluate_form_in_canonical_coordinates(X⁰, loc.elem_id, loc.xi, nderivatives)
-
-# Build a FormField from coefficient vector: f_s(v) = Σᵢ fᵢ φᵢ(v).
-
-build_field(coeffs) = Forms.build_form_field(X⁰, coeffs)
-
-# Element Jacobian determinant (uniform Cartesian grid → same for all elements).
-
-element_measure(e) = Geometry.get_element_measure(geo_2d, e)
-const jac = element_measure(1)
-
-# ## Bézier extraction cache
-#
-# 1D Bézier extraction matrices (one per 1D element) are precomputed once.
-# On each particle evaluation: φ¹(ξ) = B_bernstein(ξ) · Cᵉ (row-vector form),
-# so mul!(phi, transpose(C), B) gives the B-spline values with zero allocation.
-#
-# 2D basis = tensor product of two 1D evaluations, assembled by a manual double
-# loop (equivalent to kron) directly into the caller's preallocated buffer.
-
-const n_elem_1d = length(bp) - 1
-const _ext1d = [FunctionSpaces.get_extraction(B_1d, e, 1)[1] for e in 1:n_elem_1d]
-const _basis_start_1d = [first(FunctionSpaces.get_basis_indices(B_1d, e)) for e in 1:n_elem_1d]
-const _n_dofs_1d = FunctionSpaces.get_num_basis(B_1d)
-const _lin_dofs_2d = LinearIndices((_n_dofs_1d, _n_dofs_1d))
-
-# Evaluate Bernstein basis and first derivative into preallocated vectors.
-#   B[i+1]  = B_{i,p}(ξ)                 for i = 0..p
-#   dB[i+1] = d/dξ B_{i,p}(ξ) = p · (B_{i-1,p-1}(ξ) − B_{i,p-1}(ξ))
+# ## Bernstein basis evaluation (degree p, point ξ ∈ [0,1])
 function _bernstein_eval!(B::AbstractVector, dB::AbstractVector, p::Int, ξ::Float64)
     one_minus = 1.0 - ξ
     @inbounds for i in 0:p
@@ -163,122 +210,98 @@ function _bernstein_eval!(B::AbstractVector, dB::AbstractVector, p::Int, ξ::Flo
     return nothing
 end
 
-# Per-call scratch for the 1D Bernstein / B-spline values & derivatives.
-# Single-threaded; switch to per-thread buffers if particle loops go @threads.
-struct _ParticleBuf
-    B1::Vector{Float64}
-    dB1::Vector{Float64}
-    phi1::Vector{Float64}
-    dphi1::Vector{Float64}
-    B2::Vector{Float64}
-    dB2::Vector{Float64}
-    phi2::Vector{Float64}
-    dphi2::Vector{Float64}
-end
-_ParticleBuf() = _ParticleBuf(ntuple(_ -> zeros(P_DEG + 1), 8)...)
-
-const _pbuf = _ParticleBuf()
-
-# Fill `vals` with φ_{j1,j2}(ξ₁,ξ₂) and `gids` with their global DOF indices for
-# the (p+1)² basis functions supported on `loc`. Zero heap allocation.
-function fast_eval_particle!(vals::AbstractVector, gids::AbstractVector,
-                              loc::ParticleLocation, buf::_ParticleBuf = _pbuf)
-    # CartesianPoints getindex(1) → tuple (ξ₁, ξ₂)
+# Fill `vals` and `gids` with φ_{j1,j2}(ξ) and global DOF indices on `loc`.
+function fast_eval_particle!(ws::Workspace,
+                              vals::AbstractVector, gids::AbstractVector,
+                              loc::ParticleLocation)
+    p_deg = ws.p.P_DEG
     ξ = loc.xi[1]
-    ξ1 = ξ[1]
-    ξ2 = ξ[2]
-    # Inverse map elem_id → (i, j) 1D element indices
-    ci = CartesianIndices(lin_indices)[loc.elem_id]
-    i = ci[1]
-    j = ci[2]
+    ξ1 = ξ[1]; ξ2 = ξ[2]
+    ci = CartesianIndices(ws.lin_indices)[loc.elem_id]
+    i = ci[1]; j = ci[2]
 
-    C1 = _ext1d[i];  C2 = _ext1d[j]
-    s1 = _basis_start_1d[i];  s2 = _basis_start_1d[j]
+    C1 = ws.ext1d_1[i];  C2 = ws.ext1d_2[j]
+    s1 = ws.basis_start_1d_1[i]; s2 = ws.basis_start_1d_2[j]
 
-    _bernstein_eval!(buf.B1, buf.dB1, P_DEG, ξ1)
-    _bernstein_eval!(buf.B2, buf.dB2, P_DEG, ξ2)
-    mul!(buf.phi1, transpose(C1), buf.B1)
-    mul!(buf.phi2, transpose(C2), buf.B2)
+    _bernstein_eval!(ws.pbuf1.B, ws.pbuf1.dB, p_deg, ξ1)
+    _bernstein_eval!(ws.pbuf2.B, ws.pbuf2.dB, p_deg, ξ2)
+    mul!(ws.pbuf1.phi, transpose(C1), ws.pbuf1.B)
+    mul!(ws.pbuf2.phi, transpose(C2), ws.pbuf2.B)
 
-    p1 = P_DEG + 1
+    p1 = p_deg + 1
     k = 0
     @inbounds for j2 in 1:p1, j1 in 1:p1
         k += 1
-        vals[k] = buf.phi1[j1] * buf.phi2[j2]
-        gids[k] = _lin_dofs_2d[s1 + j1 - 1, s2 + j2 - 1]
+        vals[k] = ws.pbuf1.phi[j1] * ws.pbuf2.phi[j2]
+        gids[k] = ws.lin_dofs_2d[s1 + j1 - 1, s2 + j2 - 1]
     end
     return k
 end
 
-# Values + canonical-coord gradients. Physical gradient: ∂/∂v_d = (∂/∂ξ_d) / h_d.
-function fast_eval_particle_grad!(vals::AbstractVector,
+# Values + canonical-coord gradients ∂φ/∂ξ_d. Physical: ∂/∂v_d = (∂/∂ξ_d) / h_d.
+function fast_eval_particle_grad!(ws::Workspace,
+                                   vals::AbstractVector,
                                    dvals_dxi1::AbstractVector,
                                    dvals_dxi2::AbstractVector,
                                    gids::AbstractVector,
-                                   loc::ParticleLocation, buf::_ParticleBuf = _pbuf)
+                                   loc::ParticleLocation)
+    p_deg = ws.p.P_DEG
     ξ = loc.xi[1]
-    ξ1 = ξ[1]
-    ξ2 = ξ[2]
-    ci = CartesianIndices(lin_indices)[loc.elem_id]
-    i = ci[1]
-    j = ci[2]
+    ξ1 = ξ[1]; ξ2 = ξ[2]
+    ci = CartesianIndices(ws.lin_indices)[loc.elem_id]
+    i = ci[1]; j = ci[2]
 
-    C1 = _ext1d[i];  C2 = _ext1d[j]
-    s1 = _basis_start_1d[i];  s2 = _basis_start_1d[j]
+    C1 = ws.ext1d_1[i];  C2 = ws.ext1d_2[j]
+    s1 = ws.basis_start_1d_1[i]; s2 = ws.basis_start_1d_2[j]
 
-    _bernstein_eval!(buf.B1, buf.dB1, P_DEG, ξ1)
-    _bernstein_eval!(buf.B2, buf.dB2, P_DEG, ξ2)
-    mul!(buf.phi1,  transpose(C1), buf.B1)
-    mul!(buf.dphi1, transpose(C1), buf.dB1)
-    mul!(buf.phi2,  transpose(C2), buf.B2)
-    mul!(buf.dphi2, transpose(C2), buf.dB2)
+    _bernstein_eval!(ws.pbuf1.B, ws.pbuf1.dB, p_deg, ξ1)
+    _bernstein_eval!(ws.pbuf2.B, ws.pbuf2.dB, p_deg, ξ2)
+    mul!(ws.pbuf1.phi,  transpose(C1), ws.pbuf1.B)
+    mul!(ws.pbuf1.dphi, transpose(C1), ws.pbuf1.dB)
+    mul!(ws.pbuf2.phi,  transpose(C2), ws.pbuf2.B)
+    mul!(ws.pbuf2.dphi, transpose(C2), ws.pbuf2.dB)
 
-    p1 = P_DEG + 1
+    p1 = p_deg + 1
     k = 0
     @inbounds for j2 in 1:p1, j1 in 1:p1
         k += 1
-        vals[k]       = buf.phi1[j1]  * buf.phi2[j2]
-        dvals_dxi1[k] = buf.dphi1[j1] * buf.phi2[j2]
-        dvals_dxi2[k] = buf.phi1[j1]  * buf.dphi2[j2]
-        gids[k]       = _lin_dofs_2d[s1 + j1 - 1, s2 + j2 - 1]
+        vals[k]       = ws.pbuf1.phi[j1]  * ws.pbuf2.phi[j2]
+        dvals_dxi1[k] = ws.pbuf1.dphi[j1] * ws.pbuf2.phi[j2]
+        dvals_dxi2[k] = ws.pbuf1.phi[j1]  * ws.pbuf2.dphi[j2]
+        gids[k]       = ws.lin_dofs_2d[s1 + j1 - 1, s2 + j2 - 1]
     end
     return k
 end
 
-# Preallocated per-particle scratch for l2_project! and compute_G!.
-const _NLOC = (P_DEG + 1)^2
-const _lp_vals = zeros(_NLOC)
-const _lp_gids = zeros(Int, _NLOC)
-const _G_vals  = zeros(_NLOC)
-const _G_dxi1  = zeros(_NLOC)
-const _G_dxi2  = zeros(_NLOC)
-const _G_gids  = zeros(Int, _NLOC)
-
-export n_dofs, n_elements, M_lu
-export locate_particle, evaluate, build_field
-export fast_eval_particle!, fast_eval_particle_grad!
-
-# ## Physics routines
-#
-# The actual computation functions (L² projection, entropy, entropy gradient, collision
-# operator) are defined in functions.jl.
-
-include("functions.jl")
-
-function evaluate_on_grid(field::Forms.FormField, v_grid)
-    nv = length(v_grid)
-    F = zeros(nv, nv)
-    for (j, v2) in enumerate(v_grid)
-        for (i, v1) in enumerate(v_grid)
-            loc = locate_particle(v1, v2)
+# Sample f_s on a 2D Cartesian grid (e.g. for heatmap rendering). Points
+# outside the domain → 0.
+function evaluate_on_grid(ws::Workspace, field::Forms.FormField,
+                          v1_grid::AbstractVector, v2_grid::AbstractVector)
+    nv1 = length(v1_grid); nv2 = length(v2_grid)
+    F = zeros(nv1, nv2)
+    for (j, v2) in enumerate(v2_grid)
+        for (i, v1) in enumerate(v1_grid)
+            loc = locate_particle(ws, v1, v2)
             isnothing(loc) && continue
-            fv, _ = evaluate(field, loc::ParticleLocation)
+            fv, _ = evaluate(ws, field, loc)
             F[i, j] = fv[1][1]
         end
     end
     return F
 end
 
-export compute_entropy, compute_r!, compute_G!, compute_collision!, l2_project!, evaluate_on_grid
+export SimParameters, parse_overrides, print_summary
+export Workspace, build_workspace
+export ParticleLocation, locate_particle, evaluate, build_field, element_measure
+export fast_eval_particle!, fast_eval_particle_grad!
+export evaluate_on_grid
+
+# Physics routines (l2_project!, compute_entropy, compute_r!, compute_G!,
+# compute_collision!) plus diagnostics (compute_negative_part,
+# compute_fp_minus_fs_l2). All take `ws::Workspace` as first argument.
+include("functions.jl")
+
+export compute_entropy, compute_r!, compute_G!, compute_collision!, l2_project!
+export compute_negative_part_l1, compute_fs_minus_fp_l2
 
 end # module

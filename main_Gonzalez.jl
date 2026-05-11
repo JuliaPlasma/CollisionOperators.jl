@@ -1,50 +1,40 @@
 #! /usr/bin/env -S julia --color=yes --startup-file=no
 # -*- coding: utf-8 -*-
-# vim:fenc=utf-8
 #
-# Time integration via the Gonzalez discrete gradient method.
-# Implements Equations (59)–(61) of Jeyakumar et al.:
+# Gonzalez discrete-gradient time integration of the Landau collision
+# operator. Refactored entry point with CLI configuration:
 #
-#   (v^{n+1} - v^n)/Δt = G̃_γσ(v_mid) ∇̄_σ S_h(v^n, v^{n+1})          (60)
+#   julia --project=. main_Gonzalez.jl parameters_default.jl
+#   julia --project=. main_Gonzalez.jl parameters_picard.jl
+#   julia --project=. main_Gonzalez.jl parameters_default.jl \
+#         --N_STEPS=200 --use_anderson=false --suffix=picard_short
 #
-# where the midpoint approximation for the dissipation matrix is (Eq. 61):
-#   G̃_γσ(v_n, v_{n+1}) = G_γσ((v_n + v_{n+1})/2)
+# ARGS[1]   : path to a preset file that defines `PARAMS::SimParameters`
+# ARGS[2:]  : zero or more `--key=value` overrides applied on top of PARAMS
 #
-# and the Gonzalez discrete gradient (Eq. 59) for S_h is:
-#   ∇̄S_h(z_n, z_{n+1}) = ∇S_h(z_{mid})
-#       + (z_{n+1} - z_n) * [S_h(z_{n+1}) - S_h(z_n) - (z_{n+1}-z_n)·∇S_h(z_mid)]
-#                            / |z_{n+1} - z_n|²
-#
-# This guarantees exact discrete conservation of momentum and energy, and
-# monotone dissipation of entropy (discrete H-theorem), Sections 4.1–4.2.
-#
-# The implicit equation is solved by Anderson-accelerated fixed-point
-# iteration: a windowed least-squares mixing of the most recent `m` Picard
-# residuals. The first iteration is plain Picard; subsequent iterations
-# blend history to achieve superlinear convergence at the cost of one small
-# dense LSQ solve per iteration. Conservation is exact only at the implicit
-# solution, so a tight tolerance (≈1e-13) is required to expose the
-# structure-preserving property of the discrete gradient.
+# Diagnostics pushed to CSV every step:
+#   iter        : Picard iterations used
+#   residual    : ‖G(v) − v‖₂ at the converged iterate
+#   fp_minus_fs : ‖f_s − f_p‖₂  (histogram-based projection-error norm)
+#   neg_part    : ∫ max(−f_s, 0) dv  (Gibbs negative-part L¹)
 
 include("MantisWrappers.jl")
 using .MantisWrappers
+
 using GLMakie
 using Random
 using LinearAlgebra
+using LinearAlgebra: ldiv!, mul!
 
-include("parameters.jl")
 
-
-# Compute ∂S_h/∂v_α = -w_α G_α for every particle at positions v_parts.
-# Uses Eq. (38): ∂S_h/∂v_α = -Σ_k w_α L_k ∇φ_k(v_α).
-# All scratch (`f_coeffs_buf`, `r_vec`, `L_vec`, `G_buf`) is caller-owned.
-function compute_entropy_gradient!(dS, v_parts, w_parts,
+# Compute ∂S_h/∂v_α = -w_α G_α for every particle. Workspace-aware.
+function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
                                     f_coeffs_buf, r_vec, L_vec, G_buf)
-    l2_project!(f_coeffs_buf, v_parts, w_parts)
-    f_s = build_field(f_coeffs_buf)
-    compute_r!(r_vec, f_s)
-    ldiv!(L_vec, M_lu, r_vec)
-    compute_G!(G_buf, v_parts, L_vec)
+    l2_project!(ws, f_coeffs_buf, v_parts, w_parts)
+    f_s = build_field(ws, f_coeffs_buf)
+    compute_r!(ws, r_vec, f_s)
+    ldiv!(L_vec, ws.M_lu, r_vec)
+    compute_G!(ws, G_buf, v_parts, L_vec)
     @inbounds for α in axes(v_parts, 1)
         dS[α, 1] = -w_parts[α] * G_buf[α, 1]
         dS[α, 2] = -w_parts[α] * G_buf[α, 2]
@@ -52,26 +42,19 @@ function compute_entropy_gradient!(dS, v_parts, w_parts,
     return nothing
 end
 
-
-# One Picard map: given current iterate v_in, write v_out = v0 + dt·G̃(v_mid)·∇̄S
-# implementing the right-hand side of Eq. (60) with the Gonzalez discrete
-# gradient (Eq. 59) and the midpoint dissipation matrix (Eq. 61).
-function picard_map!(v_out, v_in, v0, w_parts, S0, dt,
+# One Picard map: v_out = v0 + dt · G̃(v_mid) · ∇̄S
+function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
                      v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
                      r_vec, L_vec, G_buf)
     N = size(v0, 1)
     @. v_mid = 0.5 * (v0 + v_in)
     @. dv    = v_in - v0
 
-    # 1. ∂S_h/∂v_α at the midpoint
-    compute_entropy_gradient!(dS_mid, v_mid, w_parts,
+    compute_entropy_gradient!(ws, dS_mid, v_mid, w_parts,
                                f_buf, r_vec, L_vec, G_buf)
+    l2_project!(ws, f_buf, v_in, w_parts)
+    S1 = compute_entropy(ws, build_field(ws, f_buf))
 
-    # 2. S_h(v_in) for the Gonzalez correction scalar
-    l2_project!(f_buf, v_in, w_parts)
-    S1 = compute_entropy(build_field(f_buf))
-
-    # 3. Gonzalez scalar correction (Eq. 59)
     dot_dv_dS = 0.0
     nrm2_dv   = 0.0
     @inbounds for α in 1:N
@@ -80,38 +63,22 @@ function picard_map!(v_out, v_in, v0, w_parts, S0, dt,
     end
     correction = nrm2_dv > 1e-30 ? (S1 - S0 - dot_dv_dS) / nrm2_dv : 0.0
 
-    # 4. Discrete gradient mapped to the G-convention used by compute_collision!:
-    #    G_eff[α] = -(∇̄S_h,α) / w_α
     @inbounds for α in 1:N
         inv_w = 1.0 / w_parts[α]
         G_eff[α, 1] = -(dS_mid[α, 1] + correction * dv[α, 1]) * inv_w
         G_eff[α, 2] = -(dS_mid[α, 2] + correction * dv[α, 2]) * inv_w
     end
 
-    # 5. Apply midpoint dissipation matrix G̃(v_mid) and form the update
-    compute_collision!(dot_v_buf, v_mid, w_parts, G_eff)
+    compute_collision!(ws, dot_v_buf, v_mid, w_parts, G_eff)
     @. v_out = v0 + dt * dot_v_buf
     return nothing
 end
 
 
-# Anderson-accelerated fixed-point iteration for one Gonzalez time step.
-#
-# Let G(v) be the Picard map (Eq. 60 RHS) and r(v) = G(v) - v its residual.
-# At iteration k we form
-#     ΔF_k = [r_{k-m+1}-r_{k-m}, …, r_k-r_{k-1}]   (2N × m_k)
-#     ΔG_k = [G_{k-m+1}-G_{k-m}, …, G_k-G_{k-1}]   (2N × m_k)
-# solve the small LSQ
-#     γ_k = argmin_γ ‖r_k − ΔF_k γ‖₂
-# and update
-#     v_{k+1} = G(v_k) − ΔG_k γ_k.
-# k=1 reduces to plain Picard (no history yet).
-#
-# Convergence criterion: ‖r_k‖ < tol·‖v_k‖. A strict tol is needed because
-# Gonzalez conservation is exact only at the fixed point.
-#
-# Returns the iteration count actually used.
-function step_anderson!(v1, v0, w_parts, S0, dt,
+# Anderson-accelerated fixed-point iteration. `use_anderson=false` falls back
+# to plain damped Picard.
+function step_anderson!(ws::Workspace,
+                        v1, v0, w_parts, S0, dt,
                         v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
                         r_vec, L_vec, G_buf,
                         Gv, r_curr, r_prev, Gv_prev, v_old, ΔF, ΔG;
@@ -133,8 +100,8 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
     n_restart = 0
 
     for k in 1:max_iter
-        vold_v .= v1_v                     # save v_in for damped mixing
-        picard_map!(Gv, v1, v0, w_parts, S0, dt,
+        vold_v .= v1_v
+        picard_map!(ws, Gv, v1, v0, w_parts, S0, dt,
                     v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
                     r_vec, L_vec, G_buf)
         @. r_v = Gv_v - v1_v
@@ -143,14 +110,10 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
 
         if nrm_r < tol * (norm(v1_v) + 1e-30)
             v1 .= Gv
-            verbose && println("    Anderson k=$k  ‖r‖=$nrm_r  history=$history  [converged]")
+            verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history  [converged]")
             return k, nrm_r, n_restart
         end
 
-        # Restart safeguard: if residual blew past best by safety factor, drop
-        # the history and take one plain Picard step on this iteration. The
-        # next iteration starts rebuilding the window from a clean (rp_v,Gp_v)
-        # pair saved at the bottom of this loop body.
         just_restarted = false
         if k > 1 && nrm_r > restart_factor * nrm_best
             history = 0
@@ -159,12 +122,10 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
         end
         nrm_r < nrm_best && (nrm_best = nrm_r)
 
-        verbose && println("    Anderson k=$k  ‖r‖=$nrm_r  history=$history" *
+        verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history" *
                            (just_restarted ? "  [restart]" : ""))
 
         if k == 1 || just_restarted || !use_anderson
-            # (damped) Picard: v1 ← β·G(v_old) + (1−β)·v_old
-            # damping=1.0 ⇒ plain Picard. Used when use_anderson=false.
             @. v1_v = damping * Gv_v + (1 - damping) * vold_v
         else
             if history < m
@@ -180,11 +141,6 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
 
             ΔFv = @view ΔF[:, 1:history]
             ΔGv = @view ΔG[:, 1:history]
-            # Tikhonov-regularized normal equations:
-            #   γ = (ΔFᵀΔF + λ²I)⁻¹ ΔFᵀ r
-            # λ² is scaled to the mean diagonal of ΔFᵀΔF so the regularizer
-            # tracks the column scale of ΔF (not ‖r‖, which can underflow
-            # the regularizer to zero as Anderson converges).
             ATA = ΔFv' * ΔFv
             ATr = ΔFv' * r_v
             diag_mean = 0.0
@@ -197,10 +153,8 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
                 ATA[j, j] += λ2
             end
             γ = ATA \ ATr
-            # u_anderson = G(v_old) − ΔG·γ;  put into v1 first
             v1 .= Gv
-            mul!(v1_v, ΔGv, γ, -1.0, 1.0)  # v1 ← Gv − ΔG·γ = u_anderson
-            # damped mixing: v1 ← β·u_anderson + (1−β)·v_old
+            mul!(v1_v, ΔGv, γ, -1.0, 1.0)
             @. v1_v = damping * v1_v + (1 - damping) * vold_v
         end
 
@@ -208,7 +162,7 @@ function step_anderson!(v1, v0, w_parts, S0, dt,
         Gp_v .= Gv_v
     end
 
-    @warn "Anderson did not converge" max_iter tol nrm_r0 nrm_r nrm_best n_restart
+    @warn "Solver did not converge" max_iter tol nrm_r0 nrm_r nrm_best n_restart
     return max_iter, nrm_r, n_restart
 end
 
@@ -225,137 +179,269 @@ function compute_energy(v_parts, w_parts)
 end
 
 
-function run_simulation(; use_anderson::Bool, suffix::String,
-                          damping::Float64, m_anderson::Int=5,
-                          tol::Float64=1e-12, max_iter::Int=1000)
-    label = use_anderson ? "Anderson(m=$m_anderson)" : "plain Picard"
-    println("\n========================================")
-    println("=== Run: $label  damping=$damping  tol=$tol  max_iter=$max_iter")
-    println("========================================")
-    Random.seed!(42)
-    v_particles = zeros(N_PARTICLES, 2)
-    # Anisotropic Gaussian; σ₁,σ₂ chosen so 3σ ≈ I_MAX, i.e. ~99.7% of
-    # particles sit inside the fine-mesh interior [I_MIN, I_MAX]², the
-    # remaining ~0.3% tail spills into the coarse outer buffer that
-    # extends to V_MIN/V_MAX.
-    v_particles[:, 1] .= σ₁ * randn(N_PARTICLES)
-    v_particles[:, 2] .= σ₂ * randn(N_PARTICLES)
-    w_particles = fill(1.0 / N_PARTICLES, N_PARTICLES)
-    f_coeffs    = zeros(n_dofs)
+# Save f_s coefficient vector + breakpoints so post-run scripts can rebuild
+# the spline. (CSV chosen for diff-friendliness with the conservation CSV.)
+function save_fs_snapshot(ws::Workspace, suffix::String, step::Int,
+                          f_coeffs::AbstractVector)
+    fname = "fs_snapshot_$(suffix)_step$(lpad(step, 4, '0')).csv"
+    open(fname, "w") do io
+        println(io, "# bp1=", join(ws.bp1, ","))
+        println(io, "# bp2=", join(ws.bp2, ","))
+        println(io, "# n_dofs=", ws.n_dofs)
+        println(io, "coeff")
+        for c in f_coeffs
+            println(io, c)
+        end
+    end
+    return fname
+end
 
-    l2_project!(f_coeffs, v_particles, w_particles)
-    f_s = build_field(f_coeffs)
+
+# Plot 1D slices f_s(v1_fixed, v2) along v₂ at three fixed v₁ values, plus the
+# log10|f_s| heatmap with negative-value red overlay. Saves PNG.
+function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
+                              suffix::String, step::Int;
+                              v1_slices::Vector{Float64}=[0.0, 0.5, 1.0],
+                              n_v2::Int=400, n_grid::Int=200)
+    p = ws.p
+    f_s = build_field(ws, f_coeffs)
+
+    # 1D slices along v₂
+    v2_grid = collect(range(p.V_MIN, p.V_MAX; length=n_v2))
+    fig = Figure(; size=(1300, 900))
+    ax_slice = Axis(fig[1, 1:2];
+        xlabel="v₂", ylabel="f_s",
+        title="f_s slices along v₂  (suffix=$suffix, step=$step)")
+    palette = [:blue, :red, :green, :purple]
+    for (i, v1f) in enumerate(v1_slices)
+        vals = [begin
+                    loc = locate_particle(ws, v1f, v2)
+                    isnothing(loc) ? 0.0 : (evaluate(ws, f_s, loc)[1][1][1])
+                end for v2 in v2_grid]
+        lines!(ax_slice, v2_grid, vals;
+            color=palette[mod1(i, length(palette))],
+            linewidth=2, label="v₁ = $v1f")
+    end
+    hlines!(ax_slice, [0.0]; color=:black, linestyle=:dash, linewidth=1)
+    axislegend(ax_slice; position=:rt)
+
+    # log10|f_s| heatmap + negative mask
+    v1_grid = collect(range(p.V_MIN, p.V_MAX; length=n_grid))
+    v2_grid_h = collect(range(p.V_MIN, p.V_MAX; length=n_grid))
+    F = evaluate_on_grid(ws, f_s, v1_grid, v2_grid_h)
+
+    F_log = similar(F)
+    @inbounds for I in eachindex(F)
+        a = abs(F[I])
+        F_log[I] = a > 1e-30 ? log10(a) : -30.0
+    end
+    ax_h = Axis(fig[2, 1];
+        xlabel="v₁", ylabel="v₂",
+        title="log10|f_s|", aspect=DataAspect())
+    hm = heatmap!(ax_h, v1_grid, v2_grid_h, F_log; colormap=:viridis)
+    Colorbar(fig[2, 1, Right()], hm)
+
+    neg_mask = map(x -> x < 0.0 ? 1.0 : NaN, F)
+    ax_n = Axis(fig[2, 2];
+        xlabel="v₁", ylabel="v₂",
+        title="negative-region mask (red = f_s < 0)", aspect=DataAspect())
+    hm2 = heatmap!(ax_n, v1_grid, v2_grid_h, F_log; colormap=:viridis)
+    Colorbar(fig[2, 2, Right()], hm2)
+    heatmap!(ax_n, v1_grid, v2_grid_h, neg_mask;
+        colormap=[:transparent, :red], colorrange=(0.0, 1.0))
+
+    png_name = "fs_diag_$(suffix)_step$(lpad(step, 4, '0')).png"
+    save(png_name, fig)
+    println("Saved $png_name")
+    return png_name
+end
+
+
+# Per-run quick-look dashboard: conservation, residuals, projection-error,
+# negative-part. Main analytical payload is the conservation CSV.
+function plot_run_dashboard(ws::Workspace,
+                            entropy_history, energy_history, momentum_history,
+                            iter_history, res_history, fp_l2_history,
+                            neg_history, suffix::String)
+    p = ws.p
+    steps = 0:p.N_STEPS
+
+    E0 = energy_history[1]
+    P0 = momentum_history[1]
+    E_err = [abs(energy_history[n+1] - E0) / abs(E0) for n in steps]
+    P_err = [hypot(momentum_history[n+1][1] - P0[1],
+                   momentum_history[n+1][2] - P0[2]) /
+             max(hypot(P0[1], P0[2]), 1e-30) for n in steps]
+
+    fig = Figure(; size=(1200, 1500))
+
+    ax_S = Axis(fig[1, 1]; xlabel="step", ylabel="H_h",
+        title="Entropy H_h (monotone increase expected)")
+    lines!(ax_S, collect(steps), entropy_history; color=:red, linewidth=2)
+
+    ax_E = Axis(fig[2, 1]; xlabel="step", ylabel="rel. error",
+        title="Energy conservation error", yscale=log10)
+    lines!(ax_E, collect(steps), max.(E_err, 1e-18); color=:blue, linewidth=2)
+
+    ax_P = Axis(fig[3, 1]; xlabel="step", ylabel="rel. error",
+        title="Momentum conservation error", yscale=log10)
+    lines!(ax_P, collect(steps), max.(P_err, 1e-18); color=:green, linewidth=2)
+
+    ax_I = Axis(fig[4, 1]; xlabel="step", ylabel="iter",
+        title="Inner-iteration count")
+    lines!(ax_I, 1:p.N_STEPS, iter_history; color=:black, linewidth=2)
+
+    ax_R = Axis(fig[5, 1]; xlabel="step", ylabel="‖r‖",
+        title="Picard fixed-point residual ‖G(v) − v‖₂", yscale=log10)
+    lines!(ax_R, 1:p.N_STEPS, max.(res_history, 1e-30); color=:purple, linewidth=2)
+
+    ax_F = Axis(fig[6, 1]; xlabel="step", ylabel="‖f_s − f_p‖₂",
+        title="Histogram-based projection error  ‖f_s − f_p‖₂")
+    lines!(ax_F, 1:p.N_STEPS, fp_l2_history; color=:orange, linewidth=2)
+
+    ax_N = Axis(fig[7, 1]; xlabel="step", ylabel="∫max(−f_s,0)",
+        title="Negative-part L¹ of f_s  (Gibbs oscillation indicator)")
+    lines!(ax_N, 1:p.N_STEPS, neg_history; color=:darkred, linewidth=2)
+
+    png_name = "dashboard_$(suffix).png"
+    save(png_name, fig)
+    println("Saved $png_name")
+    return png_name
+end
+
+
+function run_simulation(p::SimParameters)
+    print_summary(p)
+    Random.seed!(p.seed)
+
+    ws = build_workspace(p)
+    println("Workspace: n_dofs=$(ws.n_dofs)  n_elements=$(ws.n_elements)")
+
+    v_particles = zeros(p.N_PARTICLES, 2)
+    v_particles[:, 1] .= p.σ1 * randn(p.N_PARTICLES)
+    v_particles[:, 2] .= p.σ2 * randn(p.N_PARTICLES)
+    w_particles = fill(1.0 / p.N_PARTICLES, p.N_PARTICLES)
+    f_coeffs    = zeros(ws.n_dofs)
+
+    l2_project!(ws, f_coeffs, v_particles, w_particles)
+    f_s = build_field(ws, f_coeffs)
 
     entropy_history  = Float64[]
     energy_history   = Float64[]
     momentum_history = NTuple{2, Float64}[]
     iter_history     = Int[]
     res_history      = Float64[]
+    fp_l2_history    = Float64[]
+    neg_history      = Float64[]
 
-    push!(entropy_history,  compute_entropy(f_s))
+    push!(entropy_history,  compute_entropy(ws, f_s))
     push!(energy_history,   compute_energy(v_particles, w_particles))
     push!(momentum_history, compute_momentum(v_particles, w_particles))
     println("Initial  S_h = $(entropy_history[end])")
     println("Initial  E   = $(energy_history[end])")
     println("Initial  P   = $(momentum_history[end])")
+    println("Initial  ‖f_s − f_p‖₂ = " *
+            string(compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles)))
+    println("Initial  ∫max(−f_s,0) = " *
+            string(compute_negative_part_l1(ws, f_s)))
 
-    # ------------------------------------------------------------------
-    # Preallocate every per-step / per-iteration buffer once.
-    # ------------------------------------------------------------------
-    r_vec  = zeros(n_dofs)
-    L_vec  = zeros(n_dofs)
-    G      = zeros(N_PARTICLES, 2)
-    dot_v  = zeros(N_PARTICLES, 2)
-    v1     = copy(v_particles)
+    r_vec = zeros(ws.n_dofs)
+    L_vec = zeros(ws.n_dofs)
+    G     = zeros(p.N_PARTICLES, 2)
+    dot_v = zeros(p.N_PARTICLES, 2)
+    v1    = copy(v_particles)
 
     v_mid  = similar(v_particles)
     dv     = similar(v_particles)
-    dS_mid = zeros(N_PARTICLES, 2)
-    G_eff  = zeros(N_PARTICLES, 2)
-    f_buf  = zeros(n_dofs)
+    dS_mid = zeros(p.N_PARTICLES, 2)
+    G_eff  = zeros(p.N_PARTICLES, 2)
+    f_buf  = zeros(ws.n_dofs)
 
-    # Anderson workspace: history window of m residuals
-    Gv         = zeros(N_PARTICLES, 2)
-    r_curr     = zeros(N_PARTICLES, 2)
-    r_prev     = zeros(N_PARTICLES, 2)
-    Gv_prev    = zeros(N_PARTICLES, 2)
-    v_old_buf  = zeros(N_PARTICLES, 2)
-    ΔF         = zeros(2 * N_PARTICLES, m_anderson)
-    ΔG         = zeros(2 * N_PARTICLES, m_anderson)
+    Gv         = zeros(p.N_PARTICLES, 2)
+    r_curr     = zeros(p.N_PARTICLES, 2)
+    r_prev     = zeros(p.N_PARTICLES, 2)
+    Gv_prev    = zeros(p.N_PARTICLES, 2)
+    v_old_buf  = zeros(p.N_PARTICLES, 2)
+    ΔF         = zeros(2 * p.N_PARTICLES, p.m_anderson)
+    ΔG         = zeros(2 * p.N_PARTICLES, p.m_anderson)
 
-    snapshot_steps = Set([0, N_STEPS ÷ 4, N_STEPS ÷ 2, N_STEPS])
-    snapshots = Dict{Int,Matrix{Float64}}()
-    snapshots[0] = copy(v_particles)
+    snapshot_steps = Set([0, p.N_STEPS ÷ 4, p.N_STEPS ÷ 2,
+                          (3 * p.N_STEPS) ÷ 4, p.N_STEPS])
+    snapshots_v = Dict{Int, Matrix{Float64}}()
+    snapshots_v[0] = copy(v_particles)
+    save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
+    plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
-    for step in 1:N_STEPS
+    for step in 1:p.N_STEPS
         S0 = entropy_history[end]
 
-        # --------------------------------------------------------------
-        # Initial guess: explicit Euler step at v^n to seed Anderson.
-        # --------------------------------------------------------------
-        compute_r!(r_vec, f_s)
-        ldiv!(L_vec, M_lu, r_vec)
-        compute_G!(G, v_particles, L_vec)
-        compute_collision!(dot_v, v_particles, w_particles, G)
-        @. v1 = v_particles + DT * dot_v
+        compute_r!(ws, r_vec, f_s)
+        ldiv!(L_vec, ws.M_lu, r_vec)
+        compute_G!(ws, G, v_particles, L_vec)
+        compute_collision!(ws, dot_v, v_particles, w_particles, G)
+        @. v1 = v_particles + p.DT * dot_v
 
-        # --------------------------------------------------------------
-        # Anderson-accelerated fixed-point iteration (Eqs. 59–61)
-        # --------------------------------------------------------------
-        iter, res_final, n_rs = step_anderson!(v1, v_particles, w_particles, S0, DT,
+        iter, res_final, n_rs = step_anderson!(ws,
+                              v1, v_particles, w_particles, S0, p.DT,
                               v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
                               r_vec, L_vec, G,
                               Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
-                              m=m_anderson, max_iter=max_iter, tol=tol,
-                              damping=damping, use_anderson=use_anderson,
+                              m=p.m_anderson, max_iter=p.max_iter, tol=p.tol,
+                              damping=p.damping, use_anderson=p.use_anderson,
                               verbose=(step <= 3))
         v_particles .= v1
 
-        l2_project!(f_coeffs, v_particles, w_particles)
-        f_s = build_field(f_coeffs)
-        push!(entropy_history,  compute_entropy(f_s))
+        l2_project!(ws, f_coeffs, v_particles, w_particles)
+        f_s = build_field(ws, f_coeffs)
+
+        push!(entropy_history,  compute_entropy(ws, f_s))
         push!(energy_history,   compute_energy(v_particles, w_particles))
         push!(momentum_history, compute_momentum(v_particles, w_particles))
         push!(iter_history,     iter)
         push!(res_history,      res_final)
+        push!(fp_l2_history,    compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles))
+        push!(neg_history,      compute_negative_part_l1(ws, f_s))
 
-        step in snapshot_steps && (snapshots[step] = copy(v_particles))
+        if step in snapshot_steps
+            snapshots_v[step] = copy(v_particles)
+            save_fs_snapshot(ws, p.suffix, step, f_coeffs)
+            plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
+        end
+
         step % 25 == 0 &&
-            println("Step $step/$N_STEPS  iter=$iter  rs=$n_rs  ‖r‖=$(round(res_final; sigdigits=3))" *
-                    "  S = $(round(entropy_history[end]; digits=6))" *
-                    "  E = $(round(energy_history[end]; digits=8))" *
-                    "  P = ($(round(momentum_history[end][1]; digits=8))," *
-                    " $(round(momentum_history[end][2]; digits=8)))")
+            println("Step $step/$(p.N_STEPS)  iter=$iter  rs=$n_rs" *
+                    "  ‖r‖=$(round(res_final; sigdigits=3))" *
+                    "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
+                    "  neg=$(round(neg_history[end]; sigdigits=4))" *
+                    "  S=$(round(entropy_history[end]; digits=6))" *
+                    "  E=$(round(energy_history[end]; digits=8))")
     end
 
-    # ------------------------------------------------------------------
-    # Save conservation histories to CSV
-    # ------------------------------------------------------------------
-    cons_csv = "conservation_history_$(suffix).csv"
+    cons_csv = "conservation_history_$(p.suffix).csv"
     open(cons_csv, "w") do io
-        println(io, "step,time,entropy,energy,momentum_1,momentum_2,iter,residual")
-        for n in 0:N_STEPS
-            t  = n * DT
+        println(io, "step,time,entropy,energy,momentum_1,momentum_2," *
+                    "iter,residual,fp_minus_fs,neg_part")
+        for n in 0:p.N_STEPS
+            t  = n * p.DT
             S  = entropy_history[n+1]
             E  = energy_history[n+1]
             P1 = momentum_history[n+1][1]
             P2 = momentum_history[n+1][2]
             it = n == 0 ? 0   : iter_history[n]
             rs = n == 0 ? 0.0 : res_history[n]
-            println(io, "$n,$t,$S,$E,$P1,$P2,$it,$rs")
+            fl = n == 0 ? 0.0 : fp_l2_history[n]
+            nv = n == 0 ? 0.0 : neg_history[n]
+            println(io, "$n,$t,$S,$E,$P1,$P2,$it,$rs,$fl,$nv")
         end
     end
     println("Saved $cons_csv")
 
-    # ------------------------------------------------------------------
-    # Save particle snapshots (v_1, v_2 per particle) at each quarter
-    # ------------------------------------------------------------------
-    snap_csv = "particle_snapshots_$(suffix).csv"
+    snap_csv = "particle_snapshots_$(p.suffix).csv"
     open(snap_csv, "w") do io
         println(io, "step,time,particle_idx,v1,v2")
-        for s in sort(collect(keys(snapshots)))
-            pts = snapshots[s]
-            t   = s * DT
+        for s in sort(collect(keys(snapshots_v)))
+            pts = snapshots_v[s]
+            t   = s * p.DT
             for i in axes(pts, 1)
                 println(io, "$s,$t,$i,$(pts[i, 1]),$(pts[i, 2])")
             end
@@ -363,149 +449,40 @@ function run_simulation(; use_anderson::Bool, suffix::String,
     end
     println("Saved $snap_csv")
 
-    begin # Visualization
-        E0    = energy_history[1]
-        P0    = momentum_history[1]
-        steps = 0:N_STEPS
-
-        E_err = [abs(energy_history[n+1] - E0) / abs(E0) for n in steps]
-        P_err = [hypot(momentum_history[n+1][1] - P0[1],
-                       momentum_history[n+1][2] - P0[2]) / hypot(P0[1], P0[2])
-                 for n in steps]
-
-        snap_keys = sort(collect(keys(snapshots)))
-        n_snap_rows = cld(length(snap_keys), 2)
-
-        fig = Figure(; size=(1200, 200 * (n_snap_rows + 3)))
-
-        # Sample standard deviations σ_d = sqrt(⟨v_d²⟩ − ⟨v_d⟩²) per snapshot;
-        # annotate the initial and final scatters with σ₁, σ₂ to visualize
-        # anisotropy collapse toward the isotropic Maxwellian.
-        sample_std(v) = (μ = sum(v)/length(v); sqrt(sum((v .- μ).^2)/length(v)))
-        s_init  = snap_keys[1]
-        s_final = snap_keys[end]
-        for (idx, s) in enumerate(snap_keys)
-            row, col = fldmod1(idx, 2)
-            t_str = round(s * DT; digits=4)
-            pts = snapshots[s]
-            title_str = if s == s_init || s == s_final
-                σ1 = sample_std(@view pts[:, 1])
-                σ2 = sample_std(@view pts[:, 2])
-                "t = $t_str   σ₁=$(round(σ1; digits=4))   σ₂=$(round(σ2; digits=4))"
-            else
-                "t = $t_str"
-            end
-            ax = Axis(fig[row, col];
-                title=title_str,
-                xlabel="v₁", ylabel="v₂", aspect=DataAspect())
-            scatter!(ax, pts[:, 1], pts[:, 2]; markersize=2, color=:blue, alpha=0.3)
-            xlims!(ax, V_MIN, V_MAX)
-            ylims!(ax, V_MIN, V_MAX)
-        end
-
-        # H-function evolution (sign convention: H_h is the entropy functional
-        # we expect to grow monotonically; the standard Boltzmann H = ∫ f log f
-        # has the opposite sign and would decrease).
-        H_history = entropy_history
-        ax_H = Axis(fig[n_snap_rows+1, 1:2];
-            xlabel="time step", ylabel="H_h",
-            title="Boltzmann H-function (monotone increase expected)")
-        lines!(ax_H, steps, H_history; color=:red, linewidth=2)
-
-        # Energy conservation error (log scale)
-        ax_E = Axis(fig[n_snap_rows+2, 1:2];
-            xlabel="time step", ylabel="relative error",
-            title="Energy conservation error  |E_n − E_0| / E_0",
-            yscale=log10)
-        lines!(ax_E, steps, max.(E_err, 1e-18); color=:blue, linewidth=2)
-
-        # Momentum conservation error (log scale)
-        ax_P = Axis(fig[n_snap_rows+3, 1:2];
-            xlabel="time step", ylabel="relative error",
-            title="Momentum conservation error  ‖P_n − P_0‖ / ‖P_0‖",
-            yscale=log10)
-        lines!(ax_P, steps, max.(P_err, 1e-18); color=:green, linewidth=2)
-
-        png_name = "landau_collision_$(suffix)_2d.png"
-        save(png_name, fig)
-        println("Saved $png_name")
-    end
+    plot_run_dashboard(ws,
+                       entropy_history, energy_history, momentum_history,
+                       iter_history, res_history, fp_l2_history,
+                       neg_history, p.suffix)
 
     return (; entropy_history, energy_history, momentum_history,
-              iter_history, res_history, snapshots, label)
+              iter_history, res_history, fp_l2_history, neg_history,
+              snapshots_v,
+              label=(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
 end
 
 
-function plot_comparison(res_picard, res_anderson)
-    steps   = 0:N_STEPS
-    E0_p    = res_picard.energy_history[1]
-    P0_p    = res_picard.momentum_history[1]
-    E0_a    = res_anderson.energy_history[1]
-    P0_a    = res_anderson.momentum_history[1]
+function main(args=ARGS)
+    if isempty(args)
+        preset = "parameters_default.jl"
+        overrides = String[]
+    else
+        preset = args[1]
+        overrides = collect(String, args[2:end])
+    end
+    isfile(preset) || error("Preset file not found: $preset")
 
-    Eerr_p = [abs(res_picard.energy_history[n+1]   - E0_p) / abs(E0_p) for n in steps]
-    Eerr_a = [abs(res_anderson.energy_history[n+1] - E0_a) / abs(E0_a) for n in steps]
-    Perr_p = [hypot(res_picard.momentum_history[n+1][1]   - P0_p[1],
-                    res_picard.momentum_history[n+1][2]   - P0_p[2]) /
-              max(hypot(P0_p[1], P0_p[2]), 1e-30) for n in steps]
-    Perr_a = [hypot(res_anderson.momentum_history[n+1][1] - P0_a[1],
-                    res_anderson.momentum_history[n+1][2] - P0_a[2]) /
-              max(hypot(P0_a[1], P0_a[2]), 1e-30) for n in steps]
+    println("Loading preset: $preset")
+    # The preset file ends by binding PARAMS = SimParameters(...). `include`
+    # returns the last expression's value, so we capture PARAMS without
+    # relying on module globals.
+    params_loaded = include(joinpath(@__DIR__, preset))
+    p = parse_overrides(params_loaded::SimParameters, overrides)
 
-    fig = Figure(; size=(1200, 1000))
-
-    ax_S = Axis(fig[1, 1]; xlabel="time step", ylabel="H_h",
-        title="Boltzmann H-function (monotone increase expected)")
-    lines!(ax_S, steps, res_picard.entropy_history;   color=:blue, linewidth=2,
-        label=res_picard.label)
-    lines!(ax_S, steps, res_anderson.entropy_history; color=:red,  linewidth=2,
-        label=res_anderson.label, linestyle=:dash)
-    axislegend(ax_S; position=:rb)
-
-    ax_E = Axis(fig[2, 1]; xlabel="time step", ylabel="relative error",
-        title="Energy conservation error  |E_n − E_0| / E_0", yscale=log10)
-    lines!(ax_E, steps, max.(Eerr_p, 1e-18); color=:blue, linewidth=2,
-        label=res_picard.label)
-    lines!(ax_E, steps, max.(Eerr_a, 1e-18); color=:red,  linewidth=2,
-        label=res_anderson.label, linestyle=:dash)
-    axislegend(ax_E; position=:rb)
-
-    ax_P = Axis(fig[3, 1]; xlabel="time step", ylabel="relative error",
-        title="Momentum conservation error  ‖P_n − P_0‖ / ‖P_0‖", yscale=log10)
-    lines!(ax_P, steps, max.(Perr_p, 1e-18); color=:blue, linewidth=2,
-        label=res_picard.label)
-    lines!(ax_P, steps, max.(Perr_a, 1e-18); color=:red,  linewidth=2,
-        label=res_anderson.label, linestyle=:dash)
-    axislegend(ax_P; position=:rb)
-
-    ax_I = Axis(fig[4, 1]; xlabel="time step", ylabel="iterations / step",
-        title="Inner-iteration count per Gonzalez step")
-    lines!(ax_I, 1:N_STEPS, res_picard.iter_history;   color=:blue, linewidth=2,
-        label=res_picard.label)
-    lines!(ax_I, 1:N_STEPS, res_anderson.iter_history; color=:red,  linewidth=2,
-        label=res_anderson.label, linestyle=:dash)
-    axislegend(ax_I; position=:rt)
-
-    save("landau_collision_compare_2d.png", fig)
-    println("Saved landau_collision_compare_2d.png")
-end
-
-
-function main()
-    println("V ∈ [$V_MIN, $V_MAX],  I ∈ [$I_MIN, $I_MAX]")
-    println("p=$P_DEG, k=$K_REG,  inner $N_ELEM×$N_ELEM elements (+ 2 outer per dim)")
-    println("N_particles=$N_PARTICLES,  σ₁=$σ₁, σ₂=$σ₂ (~99.7% in [I_MIN,I_MAX]²),  Δt=$DT,  N_steps=$N_STEPS")
-
-    # Path C (long-time + fine mesh): finer mesh pushes Picard's Lipschitz
-    # past 1 and damped Picard cannot recover, so use Anderson with a larger
-    # history window and looser damping to stay within max_iter.
-    res_anderson = run_simulation(use_anderson=true, suffix="anderson", damping=0.7,
-                                   m_anderson=8, max_iter=2000)
-
-    avg_a = sum(res_anderson.iter_history) / length(res_anderson.iter_history)
-    max_a = maximum(res_anderson.iter_history)
+    res = run_simulation(p)
+    a = sum(res.iter_history) / length(res.iter_history)
     println("\n--- Inner-iter summary ---")
-    println("Anderson(m=8, β=0.7): avg=$(round(avg_a; digits=2))  max=$max_a")
+    println("$(res.label):  avg=$(round(a; digits=2))  max=$(maximum(res.iter_history))" *
+            "  steps=$(length(res.iter_history))")
 end
 
 main()
