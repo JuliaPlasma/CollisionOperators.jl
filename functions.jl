@@ -77,20 +77,21 @@ end
 
 # ## Landau collision-operator velocity update
 function compute_collision!(ws::Workspace, dot_v, v_parts, w_parts, G)
-    p = ws.p
+    v1_lo, v1_hi = ws.bp1[1], ws.bp1[end]
+    v2_lo, v2_hi = ws.bp2[1], ws.bp2[end]
     fill!(dot_v, 0.0)
     N = size(v_parts, 1)
     Threads.@threads for γ in 1:N
         vγ1, vγ2 = v_parts[γ, 1], v_parts[γ, 2]
-        (vγ1 <= p.V_MIN || vγ1 >= p.V_MAX ||
-         vγ2 <= p.V_MIN || vγ2 >= p.V_MAX) && continue
+        (vγ1 <= v1_lo || vγ1 >= v1_hi ||
+         vγ2 <= v2_lo || vγ2 >= v2_hi) && continue
         Gγ1, Gγ2 = G[γ, 1], G[γ, 2]
         acc1, acc2 = 0.0, 0.0
         for α in 1:N
             γ == α && continue
             vα1, vα2 = v_parts[α, 1], v_parts[α, 2]
-            (vα1 <= p.V_MIN || vα1 >= p.V_MAX ||
-             vα2 <= p.V_MIN || vα2 >= p.V_MAX) && continue
+            (vα1 <= v1_lo || vα1 >= v1_hi ||
+             vα2 <= v2_lo || vα2 >= v2_hi) && continue
             d1 = vγ1 - vα1
             d2 = vγ2 - vα2
             dist2 = d1^2 + d2^2

@@ -81,16 +81,13 @@ end
     build_workspace(p::SimParameters)
 
 Construct geometry, function space, mass matrix, quadrature, and all
-preallocated scratch from the configuration `p`. Each velocity dimension gets
-its own anisotropic uniform mesh covering [V_MIN, V_MAX]:
-  bp_d = range(V_MIN, V_MAX; length=N_ELEM_d + 1)
-
-(This worktree is the *anisotropic uniform* configuration — no inner/outer
-breakpoint jump. If you want the old non-uniform mesh, replace bp_d below.)
+preallocated scratch from the configuration `p`. Each velocity dimension uses
+its own breakpoint vector supplied by `p.bp1`, `p.bp2` (anisotropic, possibly
+non-uniform). The breakpoints are aliased into the workspace without copying.
 """
 function build_workspace(p::SimParameters)
-    bp1 = collect(Float64, range(p.V_MIN, p.V_MAX; length=p.N_ELEM_1 + 1))
-    bp2 = collect(Float64, range(p.V_MIN, p.V_MAX; length=p.N_ELEM_2 + 1))
+    bp1 = p.bp1
+    bp2 = p.bp2
 
     geo_1d_1 = Geometry.CartesianGeometry((bp1,))
     geo_1d_2 = Geometry.CartesianGeometry((bp2,))
@@ -165,8 +162,8 @@ struct ParticleLocation
 end
 
 function locate_particle(ws::Workspace, v1, v2)
-    p = ws.p
-    (v1 <= p.V_MIN || v1 >= p.V_MAX || v2 <= p.V_MIN || v2 >= p.V_MAX) && return nothing
+    (v1 <= ws.bp1[1] || v1 >= ws.bp1[end] ||
+     v2 <= ws.bp2[1] || v2 >= ws.bp2[end]) && return nothing
     i = searchsortedlast(ws.bp1, v1)
     j = searchsortedlast(ws.bp2, v2)
     h1 = ws.bp1[i+1] - ws.bp1[i]

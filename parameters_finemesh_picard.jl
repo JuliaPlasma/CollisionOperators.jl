@@ -1,10 +1,8 @@
 # Fine v₂ mesh, plain Picard counterpart of parameters_finemesh_anderson.jl.
 PARAMS = SimParameters(
-    V_MIN=-6.0, V_MAX=6.0,
-    I_MIN=-4.0, I_MAX=4.0,
-    P_DEG=2, K_REG=1,
-    N_ELEM_1=10, N_ELEM_2=50,
-    N_QUAD=6,
+    bp1 = [-6.0; -5.0; LinRange(-4.0, 4.0, 17); 5.0; 6.0],
+    bp2 = [-6.0; LinRange(-2.5, 2.5, 26); 6.0],
+    P_DEG=2, K_REG=1, N_QUAD=6,
     N_PARTICLES=10_000,
     σ1=4/3, σ2=0.5,
     DT=0.001, N_STEPS=400,

@@ -207,7 +207,7 @@ function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
     f_s = build_field(ws, f_coeffs)
 
     # 1D slices along v₂
-    v2_grid = collect(range(p.V_MIN, p.V_MAX; length=n_v2))
+    v2_grid = collect(range(p.bp2[1], p.bp2[end]; length=n_v2))
     fig = Figure(; size=(1300, 900))
     ax_slice = Axis(fig[1, 1:2];
         xlabel="v₂", ylabel="f_s",
@@ -226,8 +226,8 @@ function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
     axislegend(ax_slice; position=:rt)
 
     # log10|f_s| heatmap + negative mask
-    v1_grid = collect(range(p.V_MIN, p.V_MAX; length=n_grid))
-    v2_grid_h = collect(range(p.V_MIN, p.V_MAX; length=n_grid))
+    v1_grid   = collect(range(p.bp1[1], p.bp1[end]; length=n_grid))
+    v2_grid_h = collect(range(p.bp2[1], p.bp2[end]; length=n_grid))
     F = evaluate_on_grid(ws, f_s, v1_grid, v2_grid_h)
 
     F_log = similar(F)
