@@ -365,12 +365,32 @@ function run_simulation(p::SimParameters)
     ΔF         = zeros(2 * p.N_PARTICLES, p.m_anderson)
     ΔG         = zeros(2 * p.N_PARTICLES, p.m_anderson)
 
-    snapshot_steps = Set([0, p.N_STEPS ÷ 4, p.N_STEPS ÷ 2,
-                          (3 * p.N_STEPS) ÷ 4, p.N_STEPS])
+    # Snapshot every 25 steps (plus final step if not already a multiple of 25).
+    # Crash-safe: conservation + particles appended per-step / per-snapshot so a
+    # killed run still leaves usable data through the last completed step.
+    snapshot_steps = Set(0:25:p.N_STEPS)
+    push!(snapshot_steps, p.N_STEPS)
     snapshots_v = Dict{Int, Matrix{Float64}}()
     snapshots_v[0] = copy(v_particles)
     save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
     plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
+
+    cons_csv = "conservation_history_$(p.suffix).csv"
+    cons_io  = open(cons_csv, "w")
+    println(cons_io, "step,time,entropy,energy,momentum_1,momentum_2," *
+                     "iter,residual,fp_minus_fs,neg_part")
+    println(cons_io, "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
+                     "$(momentum_history[1][1]),$(momentum_history[1][2])," *
+                     "0,0.0,0.0,0.0")
+    flush(cons_io)
+
+    snap_csv = "particle_snapshots_$(p.suffix).csv"
+    snap_io  = open(snap_csv, "w")
+    println(snap_io, "step,time,particle_idx,v1,v2")
+    for i in axes(v_particles, 1)
+        println(snap_io, "0,0.0,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
+    end
+    flush(snap_io)
 
     for step in 1:p.N_STEPS
         S0 = entropy_history[end]
@@ -402,10 +422,26 @@ function run_simulation(p::SimParameters)
         push!(fp_l2_history,    compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles))
         push!(neg_history,      compute_negative_part_l1(ws, f_s))
 
+        # Append this step's conservation row (crash-safe).
+        let t = step * p.DT, P = momentum_history[end]
+            println(cons_io,
+                "$step,$t,$(entropy_history[end]),$(energy_history[end])," *
+                "$(P[1]),$(P[2]),$iter,$res_final," *
+                "$(fp_l2_history[end]),$(neg_history[end])")
+            flush(cons_io)
+        end
+
         if step in snapshot_steps
             snapshots_v[step] = copy(v_particles)
             save_fs_snapshot(ws, p.suffix, step, f_coeffs)
             plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
+            let t = step * p.DT
+                for i in axes(v_particles, 1)
+                    println(snap_io,
+                        "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
+                end
+                flush(snap_io)
+            end
         end
 
         step % 25 == 0 &&
@@ -417,36 +453,10 @@ function run_simulation(p::SimParameters)
                     "  E=$(round(energy_history[end]; digits=8))")
     end
 
-    cons_csv = "conservation_history_$(p.suffix).csv"
-    open(cons_csv, "w") do io
-        println(io, "step,time,entropy,energy,momentum_1,momentum_2," *
-                    "iter,residual,fp_minus_fs,neg_part")
-        for n in 0:p.N_STEPS
-            t  = n * p.DT
-            S  = entropy_history[n+1]
-            E  = energy_history[n+1]
-            P1 = momentum_history[n+1][1]
-            P2 = momentum_history[n+1][2]
-            it = n == 0 ? 0   : iter_history[n]
-            rs = n == 0 ? 0.0 : res_history[n]
-            fl = n == 0 ? 0.0 : fp_l2_history[n]
-            nv = n == 0 ? 0.0 : neg_history[n]
-            println(io, "$n,$t,$S,$E,$P1,$P2,$it,$rs,$fl,$nv")
-        end
-    end
+    # CSVs already streamed per-step / per-snapshot above. Just close.
+    close(cons_io)
+    close(snap_io)
     println("Saved $cons_csv")
-
-    snap_csv = "particle_snapshots_$(p.suffix).csv"
-    open(snap_csv, "w") do io
-        println(io, "step,time,particle_idx,v1,v2")
-        for s in sort(collect(keys(snapshots_v)))
-            pts = snapshots_v[s]
-            t   = s * p.DT
-            for i in axes(pts, 1)
-                println(io, "$s,$t,$i,$(pts[i, 1]),$(pts[i, 2])")
-            end
-        end
-    end
     println("Saved $snap_csv")
 
     plot_run_dashboard(ws,
