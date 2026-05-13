@@ -39,8 +39,15 @@ Base.@kwdef struct SimParameters
     use_anderson::Bool = true
     damping::Float64   = 0.7
     m_anderson::Int    = 8
-    tol::Float64       = 1e-12
+    tol::Float64       = 1e-12   # relative tol on ‖r‖ / ‖v‖
     max_iter::Int      = 2000
+    # Anderson convergence safety net (see `step_anderson!` doc-comment):
+    abs_floor::Float64       = 1e-7   # cap on effective tol — past this, asking
+                                       # for less is pointless (Picard noise floor)
+    stag_window::Int         = 50     # iters between stagnation checks
+    stag_rel_tol::Float64    = 0.01   # < 1% drop in `nrm_best` over window ⇒ exit
+    damp_decay_start::Int    = 200    # iter index after which damping is decayed
+    damp_decay_factor::Float64 = 0.5  # damping multiplier once decay starts
 
     # Run identifier (used in output file names)
     suffix::String = "anderson"
