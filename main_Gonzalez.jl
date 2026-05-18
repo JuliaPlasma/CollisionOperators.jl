@@ -23,8 +23,59 @@ using .MantisWrappers
 
 using GLMakie
 using Random
+using Serialization
 using LinearAlgebra
 using LinearAlgebra: ldiv!, mul!
+
+
+# ---- Checkpoint / resume ----------------------------------------------------
+# Full simulation state serialized via stdlib `Serialization` (no extra deps).
+# Written at every snapshot step (≡ every 25 steps + final). On resume, the
+# main loop reloads state and appends to the existing CSVs.
+#
+# State captured:
+#   step          : last completed step (resume continues at step+1)
+#   v_particles   : N×2 velocity matrix
+#   w_particles   : N weights (constant 1/N, saved for sanity)
+#   f_coeffs      : spline coefficient vector (size = ws.n_dofs)
+#   *_history     : seven diagnostic vectors (length = step+1 or step)
+#   rng_state     : copy of Random.default_rng() so any post-resume sampling
+#                   (none currently — kept for forward compat) is reproducible
+function checkpoint_path(suffix::String, step::Int)
+    "checkpoint_$(suffix)_step$(lpad(step, 4, '0')).jls"
+end
+
+function save_checkpoint(suffix::String, step::Int, v_particles, w_particles,
+                          f_coeffs, entropy_history, energy_history,
+                          momentum_history, iter_history, res_history,
+                          fp_l2_history, neg_history, rng_state)
+    fname = checkpoint_path(suffix, step)
+    open(fname, "w") do io
+        serialize(io, (; step, v_particles, w_particles, f_coeffs,
+                         entropy_history, energy_history, momentum_history,
+                         iter_history, res_history, fp_l2_history, neg_history,
+                         rng_state))
+    end
+    println("Saved $fname")
+    return fname
+end
+
+# `step=:auto` (or any non-positive Int) → pick the highest-step checkpoint
+# matching the suffix from the cwd.
+function load_checkpoint(suffix::String, step)
+    fname = if step === :auto || (step isa Integer && step <= 0)
+        files = filter(readdir()) do f
+            startswith(f, "checkpoint_$(suffix)_step") && endswith(f, ".jls")
+        end
+        isempty(files) && error("No checkpoint files for suffix=$suffix")
+        sort(files)[end]
+    else
+        checkpoint_path(suffix, Int(step))
+    end
+    isfile(fname) || error("Checkpoint not found: $fname")
+    println("Loading checkpoint: $fname")
+    return open(deserialize, fname)
+end
 
 
 # Compute ∂S_h/∂v_α = -w_α G_α for every particle. Workspace-aware.
@@ -355,40 +406,73 @@ function plot_run_dashboard(ws::Workspace,
 end
 
 
-function run_simulation(p::SimParameters)
+function run_simulation(p::SimParameters; resume=nothing)
     print_summary(p)
     Random.seed!(p.seed)
 
     ws = build_workspace(p)
     println("Workspace: n_dofs=$(ws.n_dofs)  n_elements=$(ws.n_elements)")
 
-    v_particles = zeros(p.N_PARTICLES, 2)
-    v_particles[:, 1] .= p.σ1 * randn(p.N_PARTICLES)
-    v_particles[:, 2] .= p.σ2 * randn(p.N_PARTICLES)
-    w_particles = fill(1.0 / p.N_PARTICLES, p.N_PARTICLES)
-    f_coeffs    = zeros(ws.n_dofs)
+    # ---- State init: either fresh sample or resume from checkpoint ----
+    start_step = 0
+    local v_particles, w_particles, f_coeffs
+    local entropy_history, energy_history, momentum_history
+    local iter_history, res_history, fp_l2_history, neg_history
 
-    l2_project!(ws, f_coeffs, v_particles, w_particles)
+    if resume !== nothing
+        ckpt = load_checkpoint(p.suffix, resume)
+        start_step = ckpt.step
+        v_particles = ckpt.v_particles
+        w_particles = ckpt.w_particles
+        f_coeffs    = ckpt.f_coeffs
+        entropy_history  = ckpt.entropy_history
+        energy_history   = ckpt.energy_history
+        momentum_history = ckpt.momentum_history
+        iter_history     = ckpt.iter_history
+        res_history      = ckpt.res_history
+        fp_l2_history    = ckpt.fp_l2_history
+        neg_history      = ckpt.neg_history
+        copy!(Random.default_rng(), ckpt.rng_state)
+
+        size(v_particles, 1) == p.N_PARTICLES || error(
+            "Checkpoint N_PARTICLES=$(size(v_particles,1)) ≠ preset N_PARTICLES=$(p.N_PARTICLES)")
+        length(f_coeffs) == ws.n_dofs || error(
+            "Checkpoint n_dofs=$(length(f_coeffs)) ≠ workspace n_dofs=$(ws.n_dofs); mesh changed?")
+        start_step < p.N_STEPS || error(
+            "Checkpoint step=$start_step ≥ N_STEPS=$(p.N_STEPS); nothing to do")
+
+        println("Resuming from step $start_step (running through $(p.N_STEPS))")
+    else
+        v_particles = zeros(p.N_PARTICLES, 2)
+        v_particles[:, 1] .= p.σ1 * randn(p.N_PARTICLES)
+        v_particles[:, 2] .= p.σ2 * randn(p.N_PARTICLES)
+        w_particles = fill(1.0 / p.N_PARTICLES, p.N_PARTICLES)
+        f_coeffs    = zeros(ws.n_dofs)
+
+        l2_project!(ws, f_coeffs, v_particles, w_particles)
+
+        entropy_history  = Float64[]
+        energy_history   = Float64[]
+        momentum_history = NTuple{2, Float64}[]
+        iter_history     = Int[]
+        res_history      = Float64[]
+        fp_l2_history    = Float64[]
+        neg_history      = Float64[]
+
+        f_s0 = build_field(ws, f_coeffs)
+        push!(entropy_history,  compute_entropy(ws, f_s0))
+        push!(energy_history,   compute_energy(v_particles, w_particles))
+        push!(momentum_history, compute_momentum(v_particles, w_particles))
+        println("Initial  S_h = $(entropy_history[end])")
+        println("Initial  E   = $(energy_history[end])")
+        println("Initial  P   = $(momentum_history[end])")
+        println("Initial  ‖f_s − f_p‖₂ = " *
+                string(compute_fs_minus_fp_l2(ws, f_s0, v_particles, w_particles)))
+        println("Initial  ∫max(−f_s,0) = " *
+                string(compute_negative_part_l1(ws, f_s0)))
+    end
+
     f_s = build_field(ws, f_coeffs)
-
-    entropy_history  = Float64[]
-    energy_history   = Float64[]
-    momentum_history = NTuple{2, Float64}[]
-    iter_history     = Int[]
-    res_history      = Float64[]
-    fp_l2_history    = Float64[]
-    neg_history      = Float64[]
-
-    push!(entropy_history,  compute_entropy(ws, f_s))
-    push!(energy_history,   compute_energy(v_particles, w_particles))
-    push!(momentum_history, compute_momentum(v_particles, w_particles))
-    println("Initial  S_h = $(entropy_history[end])")
-    println("Initial  E   = $(energy_history[end])")
-    println("Initial  P   = $(momentum_history[end])")
-    println("Initial  ‖f_s − f_p‖₂ = " *
-            string(compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles)))
-    println("Initial  ∫max(−f_s,0) = " *
-            string(compute_negative_part_l1(ws, f_s)))
 
     r_vec = zeros(ws.n_dofs)
     L_vec = zeros(ws.n_dofs)
@@ -416,28 +500,42 @@ function run_simulation(p::SimParameters)
     snapshot_steps = Set(0:25:p.N_STEPS)
     push!(snapshot_steps, p.N_STEPS)
     snapshots_v = Dict{Int, Matrix{Float64}}()
-    snapshots_v[0] = copy(v_particles)
-    save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
-    plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
     cons_csv = "conservation_history_$(p.suffix).csv"
-    cons_io  = open(cons_csv, "w")
-    println(cons_io, "step,time,entropy,energy,momentum_1,momentum_2," *
-                     "iter,residual,fp_minus_fs,neg_part")
-    println(cons_io, "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
-                     "$(momentum_history[1][1]),$(momentum_history[1][2])," *
-                     "0,0.0,0.0,0.0")
-    flush(cons_io)
-
     snap_csv = "particle_snapshots_$(p.suffix).csv"
-    snap_io  = open(snap_csv, "w")
-    println(snap_io, "step,time,particle_idx,v1,v2")
-    for i in axes(v_particles, 1)
-        println(snap_io, "0,0.0,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
-    end
-    flush(snap_io)
+    if start_step == 0
+        snapshots_v[0] = copy(v_particles)
+        save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
+        plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
-    for step in 1:p.N_STEPS
+        cons_io = open(cons_csv, "w")
+        println(cons_io, "step,time,entropy,energy,momentum_1,momentum_2," *
+                         "iter,residual,fp_minus_fs,neg_part")
+        println(cons_io, "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
+                         "$(momentum_history[1][1]),$(momentum_history[1][2])," *
+                         "0,0.0,0.0,0.0")
+        flush(cons_io)
+
+        snap_io = open(snap_csv, "w")
+        println(snap_io, "step,time,particle_idx,v1,v2")
+        for i in axes(v_particles, 1)
+            println(snap_io, "0,0.0,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
+        end
+        flush(snap_io)
+
+        # Write a step-0 checkpoint so future runs can resume even before any
+        # time-stepping completed (cheap and uniform).
+        save_checkpoint(p.suffix, 0, v_particles, w_particles, f_coeffs,
+                        entropy_history, energy_history, momentum_history,
+                        iter_history, res_history, fp_l2_history, neg_history,
+                        copy(Random.default_rng()))
+    else
+        # Resume: keep existing CSV rows ≤ start_step, append from now on.
+        cons_io = open(cons_csv, "a")
+        snap_io = open(snap_csv, "a")
+    end
+
+    for step in (start_step+1):p.N_STEPS
         S0 = entropy_history[end]
 
         compute_r!(ws, r_vec, f_s)
@@ -492,6 +590,10 @@ function run_simulation(p::SimParameters)
                 end
                 flush(snap_io)
             end
+            save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs,
+                            entropy_history, energy_history, momentum_history,
+                            iter_history, res_history, fp_l2_history, neg_history,
+                            copy(Random.default_rng()))
         end
 
         step % 25 == 0 &&
@@ -531,6 +633,19 @@ function main(args=ARGS)
     end
     isfile(preset) || error("Preset file not found: $preset")
 
+    # Strip --resume=<step|auto> out of overrides before parse_overrides sees it
+    # (it's not a SimParameters field). Accepts an integer step number or the
+    # literal `auto` to pick the highest-step checkpoint for this suffix.
+    resume = nothing
+    overrides = filter(overrides) do tok
+        if startswith(tok, "--resume=")
+            val = tok[length("--resume=")+1:end]
+            resume = (val == "auto") ? :auto : parse(Int, val)
+            return false
+        end
+        return true
+    end
+
     println("Loading preset: $preset")
     # The preset file ends by binding PARAMS = SimParameters(...). `include`
     # returns the last expression's value, so we capture PARAMS without
@@ -538,11 +653,15 @@ function main(args=ARGS)
     params_loaded = include(joinpath(@__DIR__, preset))
     p = parse_overrides(params_loaded::SimParameters, overrides)
 
-    res = run_simulation(p)
-    a = sum(res.iter_history) / length(res.iter_history)
-    println("\n--- Inner-iter summary ---")
-    println("$(res.label):  avg=$(round(a; digits=2))  max=$(maximum(res.iter_history))" *
-            "  steps=$(length(res.iter_history))")
+    res = run_simulation(p; resume=resume)
+    if isempty(res.iter_history)
+        println("\n--- No new steps run (already at N_STEPS) ---")
+    else
+        a = sum(res.iter_history) / length(res.iter_history)
+        println("\n--- Inner-iter summary ---")
+        println("$(res.label):  avg=$(round(a; digits=2))  max=$(maximum(res.iter_history))" *
+                "  steps=$(length(res.iter_history))")
+    end
 end
 
 main()

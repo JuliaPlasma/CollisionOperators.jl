@@ -34,7 +34,7 @@ ParticleBuf(p_deg::Int) = ParticleBuf(zeros(p_deg+1), zeros(p_deg+1),
 # Holds geometry, function spaces, mass-matrix LU, quadrature rule, Bézier
 # extraction caches, and per-particle / per-DOF scratch arrays. One instance
 # is built per simulation run.
-mutable struct Workspace
+struct Workspace{G, X, L, Q, E1, E2}
     # Parameters echoed for convenience (so functions don't need both args)
     p::SimParameters
 
@@ -42,22 +42,22 @@ mutable struct Workspace
     bp1::Vector{Float64}
     bp2::Vector{Float64}
 
-    # Function-space objects
-    geo_2d
-    X⁰
+    # Function-space objects (parametric to preserve concrete types)
+    geo_2d::G
+    X⁰::X
     n_dofs::Int
     n_elements::Int
     lin_indices::LinearIndices{2, Tuple{Base.OneTo{Int}, Base.OneTo{Int}}}
 
     # Mass-matrix LU factorization
-    M_lu
+    M_lu::L
 
     # Quadrature rule for entropy / r-vector integration
-    qrule_integrate
+    qrule_integrate::Q
 
-    # Bézier extraction cache, per dimension
-    ext1d_1::Vector
-    ext1d_2::Vector
+    # Bézier extraction cache, per dimension (concrete element type via E1/E2)
+    ext1d_1::Vector{E1}
+    ext1d_2::Vector{E2}
     basis_start_1d_1::Vector{Int}
     basis_start_1d_2::Vector{Int}
     n_dofs_1d_1::Int
