@@ -24,6 +24,7 @@ runs = [
     ("v6 100step 60k Δv₂=0.125", "particle_snapshots_bpmesh60k_v6.csv",      :darkgreen),
     ("v3_800 325step 40k sparse","particle_snapshots_bpmesh40k_v3_800.csv",  :darkorange),
     ("v6_800 275step 60k dense", "particle_snapshots_bpmesh60k_v6_800.csv",  :purple),
+    ("v3_unif025 400step uniform Δv₂=0.25", "particle_snapshots_bpmesh40k_v3_unif025.csv", :black),
 ]
 
 data = Dict()

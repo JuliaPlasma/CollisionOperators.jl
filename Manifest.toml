@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12"
+julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "e568d4b99acd0ff1c51d3156c78d2961d68e5e3e"
+project_hash = "d750da96ced8485533109a7fe68c5887d9e08133"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -409,9 +409,9 @@ version = "1.1.0"
 
 [[deps.FileIO]]
 deps = ["Pkg", "Requires", "UUIDs"]
-git-tree-sha1 = "6522cfb3b8fe97bec632252263057996cbd3de20"
+git-tree-sha1 = "8e9c059d6857607253e837730dbf780b6b151acd"
 uuid = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
-version = "1.18.0"
+version = "1.19.0"
 
     [deps.FileIO.extensions]
     HTTPExt = "HTTP"

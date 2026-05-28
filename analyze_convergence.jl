@@ -13,7 +13,7 @@ length(ARGS) >= 1 || error("usage: analyze_convergence.jl <tag>")
 tag = ARGS[1]
 
 cons_path = "conservation_history_$(tag).csv"
-raw, _ = readdlm(cons_path, ',', Any, '\n'; header=true)
+raw, _ = readdlm(cons_path, ',', Float64, '\n'; header=true)
 step = Int.(raw[:, 1])
 t    = Float64.(raw[:, 2])
 S    = Float64.(raw[:, 3])
