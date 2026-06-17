@@ -14,6 +14,9 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Operators" => [
+            "Lenard–Bernstein (2D)" => "lenard_bernstein.md",
+        ],
     ],
 )
 

@@ -1,0 +1,21 @@
+# LB2D_v3_pdeg3 — LB spline-degree probe. Identical to LB2D_v3 baseline except
+# P_DEG 2→3 (cubic tensor-product B-splines). Goal: test whether raising the
+# projection order changes the lateral (v₁) banding in the LB scatter.
+PARAMS = SimParameters(
+    bp1 = [-6.0; -5.0; LinRange(-4.0, 4.0, 17); 5.0; 6.0],
+    bp2 = [-6.0; LinRange(-2.5, 2.5, 26); 6.0],
+    P_DEG=3, K_REG=1, N_QUAD=6,
+    N_PARTICLES=40_000,
+    σ1=4/3, σ2=0.5,
+    nu=1.0,
+    DT=0.001, N_STEPS=800,
+    use_anderson=true,
+    damping=0.7, m_anderson=8,
+    tol=1e-12, max_iter=2000,
+    abs_floor=1e-10,
+    stag_window=30, stag_rel_tol=0.1,
+    damp_decay_start=200, damp_decay_factor=0.5,
+    snap_every=50,
+    suffix="LB2D_v3_pdeg3",
+    seed=42,
+)
