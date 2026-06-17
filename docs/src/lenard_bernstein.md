@@ -3,10 +3,11 @@
 The Lenard–Bernstein (LB) operator is a linear model collision operator that
 relaxes a distribution towards a Maxwellian while conserving mass, momentum and
 energy. This page documents the structure-preserving *particle* discretisation
-shipped as an example under
-[`examples/lenard_bernstein_2d`](https://github.com/JuliaPlasma/CollisionOperators.jl/tree/main/examples/lenard_bernstein_2d).
-The construction follows Jeyakumar et al. (2024) for the Landau operator,
-specialised to the LB kernel and written in 2D velocity space.
+that lives at the
+[repository root](https://github.com/JuliaPlasma/CollisionOperators.jl)
+(`main_LB.jl`, `functions.jl`, `MantisWrappers.jl`, `Parameters.jl`,
+`parameters_LB*.jl`). The construction follows Jeyakumar et al. (2024) for the
+Landau operator, specialised to the LB kernel and written in 2D velocity space.
 
 ## Continuous operator
 
@@ -120,12 +121,11 @@ Streamed to `conservation_history_<suffix>.csv` every step:
 ## Running
 
 ```sh
-cd examples/lenard_bernstein_2d
 julia --project=. main_LB.jl parameters_LB2D_v3.jl
 ```
 
-See the example
-[README](https://github.com/JuliaPlasma/CollisionOperators.jl/tree/main/examples/lenard_bernstein_2d)
+See the
+[README](https://github.com/JuliaPlasma/CollisionOperators.jl#run)
 for presets, overrides, checkpoint/resume and output formats.
 
 ## References
