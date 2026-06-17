@@ -15,7 +15,7 @@ Lenard–Bernstein operator: the density is reconstructed in a tensor-product
 B-spline finite-element space (via [`Mantis`](https://github.com/JuliaPlasma/Mantis.jl)),
 particles are advected by implicit midpoint, and a 3×3 Lagrange-multiplier
 system enforces exact discrete conservation of momentum and energy. Follows
-Jeyakumar et al. (2024), specialised to the LB kernel. See the
+Jeyakumar et al. (2024). See the
 [documentation](https://JuliaPlasma.github.io/CollisionOperators.jl/dev/lenard_bernstein/)
 for the scheme and the conservation algebra.
 

@@ -1,13 +1,15 @@
 # Lenard–Bernstein operator (2D)
 
-The Lenard–Bernstein (LB) operator is a linear model collision operator that
-relaxes a distribution towards a Maxwellian while conserving mass, momentum and
-energy. This page documents the structure-preserving *particle* discretisation
+The Lenard–Bernstein (LB) operator is a model collision operator that relaxes a
+distribution towards a Maxwellian. Its conservative ("modified") form — used
+here — adds drift terms so that momentum and energy are conserved alongside
+mass, which makes the operator nonlinear through its dependence on the moments
+of the distribution. This page documents the structure-preserving *particle* discretisation
 that lives at the
 [repository root](https://github.com/JuliaPlasma/CollisionOperators.jl)
 (`main_LB.jl`, `functions.jl`, `MantisWrappers.jl`, `Parameters.jl`,
-`parameters_LB*.jl`). The construction follows Jeyakumar et al. (2024) for the
-Landau operator, specialised to the LB kernel and written in 2D velocity space.
+`parameters_LB*.jl`). The construction follows Jeyakumar et al. (2024), written
+here in 2D velocity space.
 
 ## Continuous operator
 
@@ -23,8 +25,8 @@ $\nu$, the operator is written in advective (continuity) form
 where $\mathbf A\in\mathbb{R}^2$ and $B\in\mathbb{R}$ are Lagrange multipliers
 fixed by the conservation constraints. The fixed point of the flow is the
 Maxwellian for which $\nabla\log f_s + \mathbf A + B\mathbf v = 0$, and the
-discrete entropy $H_h = -\int f_s\log f_s\,\mathrm d\mathbf v$ increases
-monotonically.
+entropy $H = -\int f_s\log f_s\,\mathrm d\mathbf v$ increases monotonically
+(H-theorem).
 
 ## Particle representation
 
@@ -44,7 +46,7 @@ continuity each marker is advected by $\dot{\mathbf v}_\alpha = -\mathbf a$:
 ```
 
 In the pure-heat limit $\mathbf A = B = 0$ this is drift down the log-density
-gradient — diffusion that increases $H_h$.
+gradient — diffusion that increases $H$.
 
 ## Finite-element density and the gradient
 
@@ -130,5 +132,6 @@ for presets, overrides, checkpoint/resume and output formats.
 
 ## References
 
-- A. Jeyakumar, M. Kraus, et al., *Structure-preserving particle methods for the
-  Landau collision operator using the metriplectic framework* (2024).
+- S. Jeyakumar, M. Kraus, M. J. Hole, and D. Pfefferlé, *A structure-preserving
+  particle discretisation for the Lenard-Bernstein collision operator*,
+  arXiv:2309.16894 (2024).
