@@ -1,0 +1,6 @@
+[deps]
+CollisionOperators = "b58b20b1-6bfd-430a-a6d6-d2cc3899be11"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+
+[sources]
+CollisionOperators = {path = ".."}

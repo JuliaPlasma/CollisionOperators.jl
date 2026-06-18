@@ -1,8 +1,13 @@
 # Physics + diagnostics routines. All take `ws::Workspace` as first argument.
 
-# ## L² projection of weighted Dirac measure onto X⁰
-#
-# Solves M c = b where b_k = Σ_α w_α φ_k(v_α). The result f_s(v) = Σ c_k φ_k(v).
+"""
+    l2_project!(ws, f_coeffs, v_parts, w_parts)
+
+L² projection of the weighted Dirac measure Σ w_α δ(v − v_α) onto X⁰: solves
+`M c = b` with `b_k = Σ_α w_α φ_k(v_α)`, giving `f_s(v) = Σ c_k φ_k(v)`. The mass
+system is solved via the prefactored `ws.M_lu`. Writes the result into
+`f_coeffs` (overwritten); out-of-domain particles are skipped.
+"""
 function l2_project!(ws::Workspace, f_coeffs, v_parts, w_parts)
     rhs = zeros(ws.n_dofs)
     nloc = (ws.p.P_DEG + 1)^2
@@ -18,7 +23,13 @@ function l2_project!(ws::Workspace, f_coeffs, v_parts, w_parts)
     return nothing
 end
 
-# ## Entropy S_h = -∫ f_s log f_s dv (so dS/dt ≥ 0 with our sign convention)
+"""
+    compute_entropy(ws, field) -> S
+
+Discrete entropy `S_h = -∫ f_s log f_s dv` (sign convention: dS/dt ≥ 0), via
+quadrature over all elements. Cells where `f_s ≤ 1e-30` are skipped (log
+singularity / negative undershoots excluded). Read-only.
+"""
 function compute_entropy(ws::Workspace, field::Forms.FormField)
     S = 0.0
     for e in 1:ws.n_elements
@@ -34,7 +45,13 @@ function compute_entropy(ws::Workspace, field::Forms.FormField)
     return S
 end
 
-# ## r_i = ∫ φ_i (1 + log f_s) dv  → entropy gradient seed
+"""
+    compute_r!(ws, r, field)
+
+Entropy-gradient seed `r_i = ∫ φ_i (1 + log f_s) dv`, assembled by quadrature
+over all elements. Cells where `f_s ≤ 1e-30` contribute 0. Writes the result
+into `r` (overwritten); `L = M⁻¹ r` is the field-side entropy gradient.
+"""
 function compute_r!(ws::Workspace, r, field::Forms.FormField)
     fill!(r, 0.0)
     for e in 1:ws.n_elements
@@ -53,7 +70,14 @@ function compute_r!(ws::Workspace, r, field::Forms.FormField)
     return nothing
 end
 
-# ## G_α = ∇L(v_α) where L = M⁻¹ r — particle-side entropy gradient
+"""
+    compute_G!(ws, G, v_parts, L_vec)
+
+Particle-side entropy gradient `G_α = ∇L(v_α)` where `L = M⁻¹ r` is the FE
+coefficient vector `L_vec`. Evaluates the spline gradient at each particle and
+maps reference-cell derivatives to physical space via the cell sizes `h1, h2`.
+Writes the N×2 result into `G` (overwritten); out-of-domain particles → 0.
+"""
 function compute_G!(ws::Workspace, G, v_parts, L_vec)
     fill!(G, 0.0)
     nloc = (ws.p.P_DEG + 1)^2
@@ -75,7 +99,15 @@ function compute_G!(ws::Workspace, G, v_parts, L_vec)
     return nothing
 end
 
-# ## Landau collision-operator velocity update
+"""
+    compute_collision!(ws, dot_v, v_parts, w_parts, G)
+
+Landau collision-operator velocity update: for each particle γ accumulate the
+projected pairwise interaction `Σ_α w_α (g − d (d·g)/|d|²)/|d|` with
+`d = v_γ − v_α`, `g = G_α − G_γ`. The `(I − dd̂ᵀ)/|d|` projection is the 2D
+Landau kernel. Writes the N×2 result into `dot_v` (overwritten); particles on or
+outside the domain boundary are skipped. Threaded over γ.
+"""
 function compute_collision!(ws::Workspace, dot_v, v_parts, w_parts, G)
     v1_lo, v1_hi = ws.bp1[1], ws.bp1[end]
     v2_lo, v2_hi = ws.bp2[1], ws.bp2[end]
@@ -113,11 +145,15 @@ end
 # ##############################################################################
 # Diagnostics
 # ##############################################################################
-#
-# (1) Negative-part L¹ norm of f_s:    ∫ max(-f_s, 0) dv
-#     A direct probe of L²-projection Gibbs oscillations: the empirical density
-#     is non-negative everywhere, so any negative lobe in f_s is a projection
-#     artifact. Computed on the same Gauss–Legendre grid used elsewhere.
+
+"""
+    compute_negative_part_l1(ws, field) -> neg
+
+Diagnostic (1): negative-part L¹ norm of f_s, `∫ max(-f_s, 0) dv`, on the same
+Gauss–Legendre grid used elsewhere. A direct probe of L²-projection Gibbs
+oscillations — the empirical density is non-negative everywhere, so any negative
+lobe in f_s is a projection artifact. Read-only.
+"""
 function compute_negative_part_l1(ws::Workspace, field::Forms.FormField)
     neg = 0.0
     for e in 1:ws.n_elements
@@ -133,12 +169,16 @@ function compute_negative_part_l1(ws::Workspace, field::Forms.FormField)
     return neg
 end
 
-# (2) ‖f_s − f_p‖₂  with f_p the *element-constant histogram density*:
-#       f_p(v) = (Σ_{α: v_α ∈ e(v)} w_α) / |e(v)|
-#     where e(v) is the element containing v. Discrepancy between the smooth
-#     B-spline f_s and the piecewise-constant histogram f_p captures both the
-#     Gibbs oscillation amplitude *and* the cell-to-cell mass-distribution
-#     mismatch that drives spurious gradients via L = M⁻¹ r.
+"""
+    compute_fs_minus_fp_l2(ws, field, v_parts, w_parts) -> ‖f_s − f_p‖₂
+
+Diagnostic (2): L² projection error `‖f_s − f_p‖₂` with `f_p` the
+element-constant histogram density `f_p(v) = (Σ_{α: v_α ∈ e(v)} w_α) / |e(v)|`.
+The discrepancy between the smooth B-spline f_s and the piecewise-constant
+histogram captures both the Gibbs oscillation amplitude and the cell-to-cell
+mass-distribution mismatch that drives spurious gradients via `L = M⁻¹ r`.
+Read-only; out-of-domain particles are skipped in the histogram.
+"""
 function compute_fs_minus_fp_l2(ws::Workspace, field::Forms.FormField,
                                  v_parts::AbstractMatrix, w_parts::AbstractVector)
     # Per-element particle mass:  m_e = Σ_{α ∈ e} w_α

@@ -27,41 +27,119 @@ using Serialization
 using LinearAlgebra
 using LinearAlgebra: ldiv!, mul!
 
+# ---- Run history ------------------------------------------------------------
+# Bundle the 7 per-step diagnostic series so they travel as one value instead of
+# 7 parallel arrays threaded through every push!/checkpoint/return site.
+struct RunHistory
+    entropy::Vector{Float64}
+    energy::Vector{Float64}
+    momentum::Vector{NTuple{2,Float64}}
+    iter::Vector{Int}
+    res::Vector{Float64}
+    fp_l2::Vector{Float64}
+    neg::Vector{Float64}
+end
+RunHistory() = RunHistory(Float64[], Float64[], NTuple{2,Float64}[], Int[], Float64[], Float64[], Float64[])
+
+"""
+    push_step!(h, entropy, energy, momentum, iter, res, fp_l2, neg) -> h
+
+Append one evolution step's diagnostics to the [`RunHistory`](@ref) `h`.
+"""
+function push_step!(h::RunHistory, entropy, energy, momentum, iter, res, fp_l2, neg)
+    push!(h.entropy, entropy)
+    push!(h.energy, energy)
+    push!(h.momentum, momentum)
+    push!(h.iter, iter)
+    push!(h.res, res)
+    push!(h.fp_l2, fp_l2)
+    push!(h.neg, neg)
+    return h
+end
+
 
 # ---- Checkpoint / resume ----------------------------------------------------
 # Full simulation state serialized via stdlib `Serialization` (no extra deps).
 # Written at every snapshot step (≡ every 25 steps + final). On resume, the
 # main loop reloads state and appends to the existing CSVs.
-#
-# State captured:
-#   step          : last completed step (resume continues at step+1)
-#   v_particles   : N×2 velocity matrix
-#   w_particles   : N weights (constant 1/N, saved for sanity)
-#   f_coeffs      : spline coefficient vector (size = ws.n_dofs)
-#   *_history     : seven diagnostic vectors (length = step+1 or step)
-#   rng_state     : copy of Random.default_rng() so any post-resume sampling
-#                   (none currently — kept for forward compat) is reproducible
+
+"""
+    checkpoint_path(suffix, step) -> String
+
+Filename for the checkpoint of `suffix` at `step` (zero-padded to 4 digits).
+"""
 function checkpoint_path(suffix::String, step::Int)
-    "checkpoint_$(suffix)_step$(lpad(step, 4, '0')).jls"
+    return "checkpoint_$(suffix)_step$(lpad(step, 4, '0')).jls"
 end
 
-function save_checkpoint(suffix::String, step::Int, v_particles, w_particles,
-                          f_coeffs, entropy_history, energy_history,
-                          momentum_history, iter_history, res_history,
-                          fp_l2_history, neg_history, rng_state)
+"""
+    save_checkpoint(suffix, step, v_particles, w_particles, f_coeffs, h, rng_state) -> String
+
+Serialize the full simulation state to `checkpoint_path(suffix, step)`. State
+captured:
+
+  - `step`          : last completed step (resume continues at step+1)
+  - `v_particles`   : N×2 velocity matrix
+  - `w_particles`   : N weights (constant 1/N, saved for sanity)
+  - `f_coeffs`      : spline coefficient vector (size = ws.n_dofs)
+  - `*_history`     : the seven diagnostic vectors from `h::RunHistory`
+  - `rng_state`     : copy of Random.default_rng() so any post-resume sampling
+                      is reproducible
+
+The flat `*_history` NamedTuple shape is written (not RunHistory) so old
+checkpoints stay loadable and `load_checkpoint` needs no change.
+"""
+function save_checkpoint(
+    suffix::String, step::Int, v_particles, w_particles, f_coeffs, h::RunHistory, rng_state
+)
     fname = checkpoint_path(suffix, step)
     open(fname, "w") do io
-        serialize(io, (; step, v_particles, w_particles, f_coeffs,
-                         entropy_history, energy_history, momentum_history,
-                         iter_history, res_history, fp_l2_history, neg_history,
-                         rng_state))
+        serialize(
+            io,
+            (;
+                step,
+                v_particles,
+                w_particles,
+                f_coeffs,
+                entropy_history=h.entropy,
+                energy_history=h.energy,
+                momentum_history=h.momentum,
+                iter_history=h.iter,
+                res_history=h.res,
+                fp_l2_history=h.fp_l2,
+                neg_history=h.neg,
+                rng_state,
+            ),
+        )
     end
     println("Saved $fname")
     return fname
 end
 
-# `step=:auto` (or any non-positive Int) → pick the highest-step checkpoint
-# matching the suffix from the cwd.
+"""
+    history_from_checkpoint(ckpt) -> RunHistory
+
+Rebuild a [`RunHistory`](@ref) from a deserialized checkpoint NamedTuple.
+"""
+function history_from_checkpoint(ckpt)
+    return RunHistory(
+        ckpt.entropy_history,
+        ckpt.energy_history,
+        ckpt.momentum_history,
+        ckpt.iter_history,
+        ckpt.res_history,
+        ckpt.fp_l2_history,
+        ckpt.neg_history,
+    )
+end
+
+"""
+    load_checkpoint(suffix, step) -> NamedTuple
+
+Deserialize a checkpoint. `step=:auto` (or any non-positive Int) picks the
+highest-step checkpoint matching `suffix` from the cwd; otherwise the exact
+`checkpoint_path(suffix, step)` is loaded.
+"""
 function load_checkpoint(suffix::String, step)
     fname = if step === :auto || (step isa Integer && step <= 0)
         files = filter(readdir()) do f
@@ -78,7 +156,14 @@ function load_checkpoint(suffix::String, step)
 end
 
 
-# Compute ∂S_h/∂v_α = -w_α G_α for every particle. Workspace-aware.
+"""
+    compute_entropy_gradient!(ws, dS, v_parts, w_parts, f_coeffs_buf, r_vec, L_vec, G_buf)
+
+Compute the entropy gradient `∂S_h/∂v_α = -w_α G_α` for every particle, where
+`G = ∇L`, `L = M⁻¹ r`, and `r` is the entropy-gradient seed of the L²-projected
+field `f_s`. Workspace-aware: writes the N×2 result into `dS` (overwritten) and
+uses `f_coeffs_buf`, `r_vec`, `L_vec`, `G_buf` as scratch.
+"""
 function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
                                     f_coeffs_buf, r_vec, L_vec, G_buf)
     l2_project!(ws, f_coeffs_buf, v_parts, w_parts)
@@ -93,7 +178,17 @@ function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
     return nothing
 end
 
-# One Picard map: v_out = v0 + dt · G̃(v_mid) · ∇̄S
+"""
+    picard_map!(ws, v_out, v_in, v0, w_parts, S0, dt, v_mid, dv, dS_mid, G_eff,
+                dot_v_buf, f_buf, r_vec, L_vec, G_buf)
+
+One Picard map of the Gonzalez discrete-gradient scheme:
+`v_out = v0 + dt · G̃(v_mid) · ∇̄S`. The midpoint `v_mid = ½(v0 + v_in)` is used
+for the collision kernel; the discrete-gradient correction enforces exact
+entropy production (`S1 − S0 = ∇̄S · Δv`). Writes the N×2 result into `v_out`;
+`v_mid`, `dv`, `dS_mid`, `G_eff`, `dot_v_buf`, `f_buf`, `r_vec`, `L_vec`,
+`G_buf` are scratch (overwritten). `S0` is the entropy at `v0`.
+"""
 function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
                      v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
                      r_vec, L_vec, G_buf)
@@ -126,21 +221,40 @@ function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
 end
 
 
-# Anderson-accelerated fixed-point iteration. `use_anderson=false` falls back
-# to plain damped Picard.
-#
-# Convergence rules (any one triggers a successful exit; returned `v1` is the
-# best Gv seen across all iterations):
-#   1. Relative+floor:   ‖r‖ < max(tol * ‖v‖, abs_floor)
-#      `abs_floor` caps how tight we ask for — past the numerical noise floor
-#      of the Picard map, asking for less is pointless and burns wall time.
-#   2. Stagnation:       every `stag_window` iter, compare `nrm_best` against
-#      its value `stag_window` iters ago; relative drop < `stag_rel_tol` ⇒ exit.
-#      Catches the late-step plateau where Anderson can't push below 1e-7.
-#
-# Adaptive damping: once past `damp_decay_start` iterations without exit,
-# multiply damping by `damp_decay_factor` (more conservative step) to stabilize
-# stiff late-time fixed-point maps.
+"""
+    step_anderson!(ws, v1, v0, w_parts, S0, dt, v_mid, dv, dS_mid, G_eff,
+                   dot_v_buf, f_buf, r_vec, L_vec, G_buf,
+                   Gv, r_curr, r_prev, Gv_prev, v_old, ΔF, ΔG; kwargs...)
+
+Anderson-accelerated fixed-point iteration for the Gonzalez Picard map. State is
+the N×2 velocity matrix; all linear-algebra ops use its flat `vec()` view
+(length 2N), so the solver is dimension-agnostic. `use_anderson=false` ⇒ damped
+Picard. Returns `(iters, ‖r‖, n_restarts)`; the returned `v1` is the best Gv
+seen across all iterations.
+
+Convergence rules (any one triggers a successful exit):
+  1. Relative+floor:   ‖r‖ < max(tol · ‖v‖, abs_floor). `abs_floor` caps how
+     tight we ask for — past the Picard map's numerical noise floor, asking for
+     less is pointless and burns wall time.
+  2. Stagnation:       every `stag_window` iter, compare `nrm_best` against its
+     value `stag_window` iters ago; relative drop < `stag_rel_tol` ⇒ exit.
+
+Adaptive damping: once past `damp_decay_start` iterations without exit, multiply
+damping by `damp_decay_factor` (more conservative step) to stabilize stiff
+late-time fixed-point maps.
+
+Mutated in place (output + scratch; pass distinct, preallocated arrays):
+  `v1`     — output iterate (best Gv on return)
+  `v_mid`, `dv`, `dS_mid`, `G_eff`, `dot_v_buf`, `f_buf`, `r_vec`, `L_vec`,
+  `G_buf` — Picard-map scratch
+  `Gv`     — fixed-point map output G(v1)
+  `r_curr`, `r_prev` — current / previous residual G(v)−v
+  `Gv_prev`          — previous map output
+  `v_old`            — previous iterate
+  `ΔF`, `ΔG`         — Anderson difference matrices (2N × m)
+
+Read-only: `v0` (base velocities), `w_parts`, `S0`, `dt`, and all scalar kwargs.
+"""
 function step_anderson!(ws::Workspace,
                         v1, v0, w_parts, S0, dt,
                         v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
@@ -263,20 +377,34 @@ function step_anderson!(ws::Workspace,
 end
 
 
+"""
+    compute_momentum(v_parts, w_parts) -> (p1, p2)
+
+Total weighted momentum `Σ w_α v_α`, by component. Read-only.
+"""
 function compute_momentum(v_parts, w_parts)
     p1 = sum(w_parts[α] * v_parts[α, 1] for α in axes(v_parts, 1))
     p2 = sum(w_parts[α] * v_parts[α, 2] for α in axes(v_parts, 1))
     return (p1, p2)
 end
 
+"""
+    compute_energy(v_parts, w_parts) -> E
+
+Total weighted kinetic energy `½ Σ w_α |v_α|²`. Read-only.
+"""
 function compute_energy(v_parts, w_parts)
     return 0.5 * sum(w_parts[α] * (v_parts[α, 1]^2 + v_parts[α, 2]^2)
                      for α in axes(v_parts, 1))
 end
 
 
-# Save f_s coefficient vector + breakpoints so post-run scripts can rebuild
-# the spline. (CSV chosen for diff-friendliness with the conservation CSV.)
+"""
+    save_fs_snapshot(ws, suffix, step, f_coeffs) -> String
+
+Save the f_s coefficient vector + breakpoints so post-run scripts can rebuild
+the spline. CSV chosen for diff-friendliness with the conservation CSV.
+"""
 function save_fs_snapshot(ws::Workspace, suffix::String, step::Int,
                           f_coeffs::AbstractVector)
     fname = "fs_snapshot_$(suffix)_step$(lpad(step, 4, '0')).csv"
@@ -293,8 +421,13 @@ function save_fs_snapshot(ws::Workspace, suffix::String, step::Int,
 end
 
 
-# Plot 1D slices f_s(v1_fixed, v2) along v₂ at three fixed v₁ values, plus the
-# log10|f_s| heatmap with negative-value red overlay. Saves PNG.
+"""
+    plot_fs_diagnostics(ws, f_coeffs, suffix, step; kwargs...) -> String
+
+Per-snapshot dashboard: 1D slices `f_s(v₁_fixed, v₂)` along v₂ at three fixed v₁
+values, plus the `log10|f_s|` heatmap with a negative-region (`f_s < 0`) red
+mask overlay (the Gibbs-oscillation probe). Saves a PNG and returns its name.
+"""
 function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
                               suffix::String, step::Int;
                               v1_slices::Vector{Float64}=[0.0, 0.5, 1.0],
@@ -353,8 +486,57 @@ function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
 end
 
 
-# Per-run quick-look dashboard: conservation, residuals, projection-error,
-# negative-part. Main analytical payload is the conservation CSV.
+# ---- Streaming I/O helpers --------------------------------------------------
+
+"""
+    write_cons_row(io, step, t, entropy, energy, momentum, iter, res, fp_l2, neg)
+
+Single source for the conservation-CSV row schema (init row + per-step row).
+Writes one row and flushes (crash-safe).
+"""
+function write_cons_row(io, step, t, entropy, energy, momentum, iter, res, fp_l2, neg)
+    println(io, "$step,$t,$entropy,$energy,$(momentum[1]),$(momentum[2])," *
+                "$iter,$res,$fp_l2,$neg")
+    flush(io)
+    return nothing
+end
+
+"""
+    dump_particles(io, step, t, v_particles)
+
+Append every particle's `(step, t, idx, v1, v2)` row to `io` and flush.
+"""
+function dump_particles(io, step, t, v_particles)
+    for i in axes(v_particles, 1)
+        println(io, "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
+    end
+    flush(io)
+    return nothing
+end
+
+"""
+    take_snapshot(ws, p, step, f_coeffs, v_particles, w_particles, h, snap_io)
+
+Everything written at a snapshot step: f_s CSV + diagnostic PNG + particle dump
++ checkpoint. Runs identically at step 0 and inside the loop.
+"""
+function take_snapshot(ws, p, step, f_coeffs, v_particles, w_particles, h::RunHistory, snap_io)
+    save_fs_snapshot(ws, p.suffix, step, f_coeffs)
+    plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
+    dump_particles(snap_io, step, step * p.DT, v_particles)
+    save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs, h, copy(Random.default_rng()))
+    return nothing
+end
+
+
+"""
+    plot_run_dashboard(ws, entropy_history, energy_history, momentum_history,
+                       iter_history, res_history, fp_l2_history, neg_history, suffix) -> String
+
+Per-run quick-look dashboard: entropy, conservation errors (energy/momentum),
+inner-iteration count, fixed-point residual, projection error, and negative
+part. Main analytical payload is the conservation CSV. Saves a PNG.
+"""
 function plot_run_dashboard(ws::Workspace,
                             entropy_history, energy_history, momentum_history,
                             iter_history, res_history, fp_l2_history,
@@ -406,6 +588,15 @@ function plot_run_dashboard(ws::Workspace,
 end
 
 
+"""
+    run_simulation(p; resume=nothing) -> NamedTuple
+
+Drive the full Gonzalez discrete-gradient time integration for parameters `p`.
+Either samples a fresh particle ensemble or resumes from a checkpoint
+(`resume = step | :auto`). Streams the conservation + particle-snapshot CSVs
+per step / per snapshot (crash-safe), writes per-snapshot f_s/PNG/checkpoint,
+plots the run dashboard, and returns the diagnostic histories + a `label`.
+"""
 function run_simulation(p::SimParameters; resume=nothing)
     print_summary(p)
     Random.seed!(p.seed)
@@ -415,9 +606,7 @@ function run_simulation(p::SimParameters; resume=nothing)
 
     # ---- State init: either fresh sample or resume from checkpoint ----
     start_step = 0
-    local v_particles, w_particles, f_coeffs
-    local entropy_history, energy_history, momentum_history
-    local iter_history, res_history, fp_l2_history, neg_history
+    local v_particles, w_particles, f_coeffs, hist
 
     if resume !== nothing
         ckpt = load_checkpoint(p.suffix, resume)
@@ -425,13 +614,7 @@ function run_simulation(p::SimParameters; resume=nothing)
         v_particles = ckpt.v_particles
         w_particles = ckpt.w_particles
         f_coeffs    = ckpt.f_coeffs
-        entropy_history  = ckpt.entropy_history
-        energy_history   = ckpt.energy_history
-        momentum_history = ckpt.momentum_history
-        iter_history     = ckpt.iter_history
-        res_history      = ckpt.res_history
-        fp_l2_history    = ckpt.fp_l2_history
-        neg_history      = ckpt.neg_history
+        hist = history_from_checkpoint(ckpt)
         copy!(Random.default_rng(), ckpt.rng_state)
 
         size(v_particles, 1) == p.N_PARTICLES || error(
@@ -451,25 +634,18 @@ function run_simulation(p::SimParameters; resume=nothing)
 
         l2_project!(ws, f_coeffs, v_particles, w_particles)
 
-        entropy_history  = Float64[]
-        energy_history   = Float64[]
-        momentum_history = NTuple{2, Float64}[]
-        iter_history     = Int[]
-        res_history      = Float64[]
-        fp_l2_history    = Float64[]
-        neg_history      = Float64[]
-
+        hist = RunHistory()
         f_s0 = build_field(ws, f_coeffs)
-        push!(entropy_history,  compute_entropy(ws, f_s0))
-        push!(energy_history,   compute_energy(v_particles, w_particles))
-        push!(momentum_history, compute_momentum(v_particles, w_particles))
-        println("Initial  S_h = $(entropy_history[end])")
-        println("Initial  E   = $(energy_history[end])")
-        println("Initial  P   = $(momentum_history[end])")
-        println("Initial  ‖f_s − f_p‖₂ = " *
-                string(compute_fs_minus_fp_l2(ws, f_s0, v_particles, w_particles)))
-        println("Initial  ∫max(−f_s,0) = " *
-                string(compute_negative_part_l1(ws, f_s0)))
+        push!(hist.entropy,  compute_entropy(ws, f_s0))
+        push!(hist.energy,   compute_energy(v_particles, w_particles))
+        push!(hist.momentum, compute_momentum(v_particles, w_particles))
+        println("Initial  S_h = $(hist.entropy[end])")
+        println("Initial  E   = $(hist.energy[end])")
+        println("Initial  P   = $(hist.momentum[end])")
+        fs_minus_fp_l2 = compute_fs_minus_fp_l2(ws, f_s0, v_particles, w_particles)
+        println("Initial  ‖f_s − f_p‖₂ = " * string(fs_minus_fp_l2))
+        neg_part = compute_negative_part_l1(ws, f_s0)
+        println("Initial  ∫max(−f_s,0) = " * string(neg_part))
     end
 
     f_s = build_field(ws, f_coeffs)
@@ -499,36 +675,23 @@ function run_simulation(p::SimParameters; resume=nothing)
     # killed run still leaves usable data through the last completed step.
     snapshot_steps = Set(0:25:p.N_STEPS)
     push!(snapshot_steps, p.N_STEPS)
-    snapshots_v = Dict{Int, Matrix{Float64}}()
 
     cons_csv = "conservation_history_$(p.suffix).csv"
     snap_csv = "particle_snapshots_$(p.suffix).csv"
-    if start_step == 0
-        snapshots_v[0] = copy(v_particles)
-        save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
-        plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
+    if start_step == 0
         cons_io = open(cons_csv, "w")
         println(cons_io, "step,time,entropy,energy,momentum_1,momentum_2," *
                          "iter,residual,fp_minus_fs,neg_part")
-        println(cons_io, "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
-                         "$(momentum_history[1][1]),$(momentum_history[1][2])," *
-                         "0,0.0,0.0,0.0")
-        flush(cons_io)
+        write_cons_row(cons_io, 0, 0.0, hist.entropy[1], hist.energy[1],
+                       hist.momentum[1], 0, 0.0, fs_minus_fp_l2, neg_part)
 
         snap_io = open(snap_csv, "w")
         println(snap_io, "step,time,particle_idx,v1,v2")
-        for i in axes(v_particles, 1)
-            println(snap_io, "0,0.0,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
-        end
-        flush(snap_io)
 
-        # Write a step-0 checkpoint so future runs can resume even before any
-        # time-stepping completed (cheap and uniform).
-        save_checkpoint(p.suffix, 0, v_particles, w_particles, f_coeffs,
-                        entropy_history, energy_history, momentum_history,
-                        iter_history, res_history, fp_l2_history, neg_history,
-                        copy(Random.default_rng()))
+        # Step-0 snapshot (f_s CSV + PNG + particle dump + checkpoint) so future
+        # runs can resume even before any time-stepping completed.
+        take_snapshot(ws, p, 0, f_coeffs, v_particles, w_particles, hist, snap_io)
     else
         # Resume: keep existing CSV rows ≤ start_step, append from now on.
         cons_io = open(cons_csv, "a")
@@ -536,7 +699,7 @@ function run_simulation(p::SimParameters; resume=nothing)
     end
 
     for step in (start_step+1):p.N_STEPS
-        S0 = entropy_history[end]
+        S0 = hist.entropy[end]
 
         compute_r!(ws, r_vec, f_s)
         ldiv!(L_vec, ws.M_lu, r_vec)
@@ -562,47 +725,30 @@ function run_simulation(p::SimParameters; resume=nothing)
         l2_project!(ws, f_coeffs, v_particles, w_particles)
         f_s = build_field(ws, f_coeffs)
 
-        push!(entropy_history,  compute_entropy(ws, f_s))
-        push!(energy_history,   compute_energy(v_particles, w_particles))
-        push!(momentum_history, compute_momentum(v_particles, w_particles))
-        push!(iter_history,     iter)
-        push!(res_history,      res_final)
-        push!(fp_l2_history,    compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles))
-        push!(neg_history,      compute_negative_part_l1(ws, f_s))
+        push_step!(hist,
+                   compute_entropy(ws, f_s),
+                   compute_energy(v_particles, w_particles),
+                   compute_momentum(v_particles, w_particles),
+                   iter, res_final,
+                   compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles),
+                   compute_negative_part_l1(ws, f_s))
 
         # Append this step's conservation row (crash-safe).
-        let t = step * p.DT, P = momentum_history[end]
-            println(cons_io,
-                "$step,$t,$(entropy_history[end]),$(energy_history[end])," *
-                "$(P[1]),$(P[2]),$iter,$res_final," *
-                "$(fp_l2_history[end]),$(neg_history[end])")
-            flush(cons_io)
-        end
+        write_cons_row(cons_io, step, step * p.DT, hist.entropy[end],
+                       hist.energy[end], hist.momentum[end], iter, res_final,
+                       hist.fp_l2[end], hist.neg[end])
 
         if step in snapshot_steps
-            snapshots_v[step] = copy(v_particles)
-            save_fs_snapshot(ws, p.suffix, step, f_coeffs)
-            plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
-            let t = step * p.DT
-                for i in axes(v_particles, 1)
-                    println(snap_io,
-                        "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
-                end
-                flush(snap_io)
-            end
-            save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs,
-                            entropy_history, energy_history, momentum_history,
-                            iter_history, res_history, fp_l2_history, neg_history,
-                            copy(Random.default_rng()))
+            take_snapshot(ws, p, step, f_coeffs, v_particles, w_particles, hist, snap_io)
         end
 
         step % 25 == 0 &&
             println("Step $step/$(p.N_STEPS)  iter=$iter  rs=$n_rs" *
                     "  ‖r‖=$(round(res_final; sigdigits=3))" *
-                    "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
-                    "  neg=$(round(neg_history[end]; sigdigits=4))" *
-                    "  S=$(round(entropy_history[end]; digits=6))" *
-                    "  E=$(round(energy_history[end]; digits=8))")
+                    "  ‖f_s−f_p‖=$(round(hist.fp_l2[end]; sigdigits=4))" *
+                    "  neg=$(round(hist.neg[end]; sigdigits=4))" *
+                    "  S=$(round(hist.entropy[end]; digits=6))" *
+                    "  E=$(round(hist.energy[end]; digits=8))")
     end
 
     # CSVs already streamed per-step / per-snapshot above. Just close.
@@ -612,17 +758,25 @@ function run_simulation(p::SimParameters; resume=nothing)
     println("Saved $snap_csv")
 
     plot_run_dashboard(ws,
-                       entropy_history, energy_history, momentum_history,
-                       iter_history, res_history, fp_l2_history,
-                       neg_history, p.suffix)
+                       hist.entropy, hist.energy, hist.momentum,
+                       hist.iter, hist.res, hist.fp_l2,
+                       hist.neg, p.suffix)
 
-    return (; entropy_history, energy_history, momentum_history,
-              iter_history, res_history, fp_l2_history, neg_history,
-              snapshots_v,
+    return (; entropy_history=hist.entropy, energy_history=hist.energy,
+              momentum_history=hist.momentum, iter_history=hist.iter,
+              res_history=hist.res, fp_l2_history=hist.fp_l2,
+              neg_history=hist.neg,
               label=(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
 end
 
 
+"""
+    main(args=ARGS)
+
+CLI entry point. Parses `ARGS[1]` as the preset file and `ARGS[2:]` as
+`--key=value` overrides (plus a `--resume=<step|auto>` flag stripped before
+override parsing), then runs the simulation and prints an inner-iter summary.
+"""
 function main(args=ARGS)
     if isempty(args)
         preset = "parameters_default.jl"

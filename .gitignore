@@ -12,6 +12,10 @@ tags
 # Julia
 Manifest.toml
 
+# Documenter
+/docs/Manifest*.toml
+/docs/build/
+
 # Output
 *.png
 *.csv
