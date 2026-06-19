@@ -35,6 +35,17 @@ Base.@kwdef struct SimParameters
     DT::Float64 = 0.001
     N_STEPS::Int = 400
 
+    # Discrete-gradient variant: true = Gonzalez (entropy-exact, has |Δv|²
+    # denominator that blows up near equilibrium); false = plain implicit
+    # midpoint (drop the Gonzalez correction term).
+    use_gonzalez::Bool = true
+
+    # Entropy/seed integrand variant: true = log f = ½ log f² identity, so
+    # f_s<0 quadrature points contribute via |f| guard (default — observed to
+    # keep the negative-f_s region and slice oscillations from growing over the
+    # run); false = positivity-clamped log f (drop f_s<0 points).
+    use_logsq::Bool = true
+
     # Implicit-solver knobs
     use_anderson::Bool = true
     damping::Float64   = 0.7
@@ -124,6 +135,8 @@ function print_summary(p::SimParameters)
     println("DT=$(p.DT)  N_STEPS=$(p.N_STEPS)")
     println("solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *
             "  damping=$(p.damping)  tol=$(p.tol)  max_iter=$(p.max_iter)")
+    println("disc_grad=$(p.use_gonzalez ? "Gonzalez" : "plain-midpoint")" *
+            "  entropy_integrand=$(p.use_logsq ? "½log f²" : "clamped log f")")
     println("suffix=$(p.suffix)")
     println("=======================")
 end
