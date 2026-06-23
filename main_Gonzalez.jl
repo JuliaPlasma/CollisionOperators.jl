@@ -94,25 +94,32 @@ function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
 end
 
 # One Picard map: v_out = v0 + dt · G̃(v_mid) · ∇̄S
+# `use_gonzalez=false` drops the discrete-gradient correction term, leaving the
+# plain implicit-midpoint rule ∇̄S = ∇S(v_mid). This avoids the Gonzalez |Δv|²
+# denominator that blows up when started at (or near) equilibrium (Δv → 0).
 function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
                      v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
-                     r_vec, L_vec, G_buf)
+                     r_vec, L_vec, G_buf; use_gonzalez::Bool=true)
     N = size(v0, 1)
     @. v_mid = 0.5 * (v0 + v_in)
     @. dv    = v_in - v0
 
     compute_entropy_gradient!(ws, dS_mid, v_mid, w_parts,
                                f_buf, r_vec, L_vec, G_buf)
-    l2_project!(ws, f_buf, v_in, w_parts)
-    S1 = compute_entropy(ws, build_field(ws, f_buf))
 
-    dot_dv_dS = 0.0
-    nrm2_dv   = 0.0
-    @inbounds for α in 1:N
-        dot_dv_dS += dv[α, 1] * dS_mid[α, 1] + dv[α, 2] * dS_mid[α, 2]
-        nrm2_dv   += dv[α, 1]^2               + dv[α, 2]^2
+    correction = 0.0
+    if use_gonzalez
+        l2_project!(ws, f_buf, v_in, w_parts)
+        S1 = compute_entropy(ws, build_field(ws, f_buf))
+
+        dot_dv_dS = 0.0
+        nrm2_dv   = 0.0
+        @inbounds for α in 1:N
+            dot_dv_dS += dv[α, 1] * dS_mid[α, 1] + dv[α, 2] * dS_mid[α, 2]
+            nrm2_dv   += dv[α, 1]^2               + dv[α, 2]^2
+        end
+        correction = nrm2_dv > 1e-30 ? (S1 - S0 - dot_dv_dS) / nrm2_dv : 0.0
     end
-    correction = nrm2_dv > 1e-30 ? (S1 - S0 - dot_dv_dS) / nrm2_dv : 0.0
 
     @inbounds for α in 1:N
         inv_w = 1.0 / w_parts[α]
@@ -152,7 +159,7 @@ function step_anderson!(ws::Workspace,
                         damp_decay_start=200, damp_decay_factor=0.5,
                         restart_factor=Inf, damping=0.5,
                         reg_factor=1e-10, verbose=false,
-                        use_anderson::Bool=true)
+                        use_anderson::Bool=true, use_gonzalez::Bool=true)
     v1_v   = vec(v1)
     Gv_v   = vec(Gv)
     r_v    = vec(r_curr)
@@ -175,7 +182,7 @@ function step_anderson!(ws::Workspace,
         vold_v .= v1_v
         picard_map!(ws, Gv, v1, v0, w_parts, S0, dt,
                     v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
-                    r_vec, L_vec, G_buf)
+                    r_vec, L_vec, G_buf; use_gonzalez=use_gonzalez)
         @. r_v = Gv_v - v1_v
         nrm_r = norm(r_v)
         k == 1 && (nrm_r0 = nrm_r)
@@ -410,6 +417,9 @@ function run_simulation(p::SimParameters; resume=nothing)
     print_summary(p)
     Random.seed!(p.seed)
 
+    # Select entropy/seed integrand variant for compute_entropy / compute_r!.
+    USE_LOGSQ[] = p.use_logsq
+
     ws = build_workspace(p)
     println("Workspace: n_dofs=$(ws.n_dofs)  n_elements=$(ws.n_elements)")
 
@@ -556,6 +566,7 @@ function run_simulation(p::SimParameters; resume=nothing)
                               damp_decay_start=p.damp_decay_start,
                               damp_decay_factor=p.damp_decay_factor,
                               damping=p.damping, use_anderson=p.use_anderson,
+                              use_gonzalez=p.use_gonzalez,
                               verbose=(step <= 3))
         v_particles .= v1
 

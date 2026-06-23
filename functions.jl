@@ -1,5 +1,13 @@
 # Physics + diagnostics routines. All take `ws::Workspace` as first argument.
 
+# Toggle for the log-square identity  log f = ½ log f².  When true, the entropy
+# and entropy-gradient-seed integrands use ½·log(f²), so quadrature points where
+# the projected f_s is slightly NEGATIVE (Gibbs undershoot) still contribute
+# (guard on |f|, i.e. f² > floor) instead of being clamped to zero by the
+# `f_val > 1e-30` positivity test. Default false = original clamped behavior.
+# Set once per run from `PARAMS.use_logsq` in `run_simulation`.
+const USE_LOGSQ = Ref(false)
+
 # ## L² projection of weighted Dirac measure onto X⁰
 #
 # Solves M c = b where b_k = Σ_α w_α φ_k(v_α). The result f_s(v) = Σ c_k φ_k(v).
@@ -26,7 +34,12 @@ function compute_entropy(ws::Workspace, field::Forms.FormField)
         fv, _ = evaluate(ws, field, e)
         for q in eachindex(ws.qrule_integrate.weights)
             f_val = fv[1][q]
-            if f_val > 1e-30
+            if USE_LOGSQ[]
+                # log f = ½ log f²: keep undershoot (f<0) points via |f| guard.
+                if f_val^2 > 1e-60
+                    S -= f_val * 0.5 * log(f_val^2) * ws.qrule_integrate.weights[q] * jac
+                end
+            elseif f_val > 1e-30
                 S -= f_val * log(f_val) * ws.qrule_integrate.weights[q] * jac
             end
         end
@@ -43,7 +56,12 @@ function compute_r!(ws::Workspace, r, field::Forms.FormField)
         evals, indices = evaluate(ws, e)
         for q in eachindex(ws.qrule_integrate.weights)
             f_val = fv[1][q]
-            integrand = f_val > 1e-30 ? (1 + log(f_val)) : 0.0
+            integrand = if USE_LOGSQ[]
+                # 1 + log f = 1 + ½ log f²: undershoot points contribute via |f| guard.
+                f_val^2 > 1e-60 ? (1 + 0.5 * log(f_val^2)) : 0.0
+            else
+                f_val > 1e-30 ? (1 + log(f_val)) : 0.0
+            end
             for (j, gidx) in enumerate(indices[1])
                 r[gidx] += integrand * evals[1][q, j] *
                           ws.qrule_integrate.weights[q] * jac

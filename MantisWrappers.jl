@@ -300,5 +300,6 @@ include("functions.jl")
 
 export compute_entropy, compute_r!, compute_G!, compute_collision!, l2_project!
 export compute_negative_part_l1, compute_fs_minus_fp_l2
+export USE_LOGSQ
 
 end # module
