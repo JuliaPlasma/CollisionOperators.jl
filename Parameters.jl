@@ -1,78 +1,137 @@
-# Parameters.jl — 2D Lenard-Bernstein configuration.
+# Parameters.jl — simulation configuration carried via a single immutable struct.
 #
 # Workflow:
-#   1. Preset files (parameters_LB2D_*.jl) build a `SimParameters` bound to
-#      `PARAMS::SimParameters`. Each preset directly supplies the anisotropic
-#      breakpoint vectors `bp1`, `bp2`.
-#   2. main_LB.jl picks ARGS[1] as preset, --key=val tokens override scalars.
-#   3. Vector fields (`bp1`, `bp2`) not CLI-overridable — edit the preset.
+#   1. Concrete preset files (parameters_default.jl, parameters_finemesh.jl, …)
+#      construct a `SimParameters` value bound to the global symbol `PARAMS`.
+#      Each preset directly provides the breakpoint vectors `bp1`, `bp2`
+#      (anisotropic, possibly non-uniform).
+#   2. The CLI entry point in main.jl picks the preset file from
+#      ARGS[1] (defaulting to "parameters_default.jl") and `include`s it.
+#   3. Remaining ARGS of the form --key=val override individual *scalar* fields
+#      via `parse_overrides` (vector fields like `bp1`/`bp2` are not CLI-
+#      overridable — re-edit the preset file instead).
 #
-# Initial condition: anisotropic centered Gaussian  v ~ N(0, diag(σ1², σ2²)).
-# Defaults match the 2D Landau "v3 baseline" mesh + IC that exhibited the
-# honeycomb artifact, so an LB run on the identical mesh isolates whether the
-# artifact is mesh/projection-driven (appears here too) or Landau-kernel-
-# specific (absent here).
-
-using Random
+# Every downstream module (MantisWrappers, functions, main loop) accepts an
+# instance of `SimParameters` rather than reading globals; this is the only
+# state shared across the call chain besides the preallocated `Workspace`.
 
 Base.@kwdef struct SimParameters
     # Velocity-space breakpoints (anisotropic, possibly non-uniform).
+    # `bp1[1]`/`bp1[end]` define the v₁ domain; cell count = `length(bp1) - 1`.
     bp1::Vector{Float64} = [-6.0; -5.0; LinRange(-4.0, 4.0, 17); 5.0; 6.0]
-    bp2::Vector{Float64} = [-6.0; LinRange(-2.5, 2.5, 26); 6.0]
+    bp2::Vector{Float64} = [-6.0; LinRange(-2.5, 2.5, 13); 6.0]
 
     # B-spline space
     P_DEG::Int = 2
     K_REG::Int = 1
-    N_QUAD::Int = 6
+    N_QUAD::Int = 6              # 1D Gauss–Legendre points per element
 
-    # Particles + anisotropic Gaussian IC (centered, untruncated)
-    N_PARTICLES::Int = 40_000
-    σ1::Float64 = 4 / 3
+    # Particle initial condition (anisotropic Gaussian, untruncated)
+    N_PARTICLES::Int = 10_000
+    σ1::Float64 = 4/3
     σ2::Float64 = 0.5
 
-    # Collision frequency
+    # Time integration
+    DT::Float64 = 0.001
+    N_STEPS::Int = 400
+
+    # Snapshot cadence: every `snap_every` steps write fs_snapshot CSV, render the
+    # fs_diag PNG, dump particle rows, checkpoint, and mirror the CSV to S3. Larger
+    # values cut plotting/I-O overhead on long runs (the conservation CSV is always
+    # per-step regardless).
+    snap_every::Int = 25
+
+    # Collision operator: :landau = O(N²) perpendicular-projection Landau sum
+    # (GPU-capable via use_gpu/gpu_fp32/gpu_fp16); :lb = O(N) conservative
+    # Lenard-Bernstein drift v̇ = -ν(∇f/f + A + B v). Both share the identical
+    # mesh / projection / Anderson scaffolding and the use_gonzalez toggle, so an
+    # LB run on the same preset isolates operator-specific behavior. GPU applies
+    # to :landau only — :lb + use_gpu runs on CPU (warned at startup).
+    collision_model::Symbol = :landau
+
+    # LB collision frequency ν (only used when collision_model == :lb).
     nu::Float64 = 1.0
 
-    # Time integration (implicit midpoint)
-    DT::Float64 = 0.001
-    N_STEPS::Int = 800
+    # Discrete-gradient variant: true = Gonzalez (entropy-exact, has |Δv|²
+    # denominator that blows up near equilibrium); false = plain implicit
+    # midpoint (drop the Gonzalez correction term).
+    use_gonzalez::Bool = true
+
+    # Entropy/seed integrand variant: false = positivity-clamped log f (drop
+    # f_s<0 quadrature points); true = log f = ½ log f² identity, so Gibbs
+    # undershoot points contribute via |f| guard. Probe for spike sensitivity.
+    use_logsq::Bool = false
 
     # Implicit-solver knobs
     use_anderson::Bool = true
-    damping::Float64 = 0.7
-    m_anderson::Int = 8
-    tol::Float64 = 1e-12
-    max_iter::Int = 2000
-    abs_floor::Float64 = 1e-10
-    stag_window::Int = 30
-    stag_rel_tol::Float64 = 0.1
-    damp_decay_start::Int = 200
-    damp_decay_factor::Float64 = 0.5
+    damping::Float64   = 0.7
+    m_anderson::Int    = 8
+    tol::Float64       = 1e-12   # relative tol on ‖r‖ / ‖v‖
+    max_iter::Int      = 2000
+    # Anderson convergence safety net (see `step_anderson!` doc-comment):
+    abs_floor::Float64       = 1e-7   # cap on effective tol — past this, asking
+                                       # for less is pointless (Picard noise floor)
+    stag_window::Int         = 50     # iters between stagnation checks
+    stag_rel_tol::Float64    = 0.01   # < 1% drop in `nrm_best` over window ⇒ exit
+    damp_decay_start::Int    = 200    # iter index after which damping is decayed
+    damp_decay_factor::Float64 = 0.5  # damping multiplier once decay starts
 
-    # Snapshot cadence (every snap_every steps + final)
-    snap_every::Int = 50
+    # Warm start for the implicit solve: :euler = explicit Euler predictor
+    # (default, current behavior); :nn = Euler + Δt²·δ̂ MLP correction loaded
+    # from `nn_weights` (see warmstart_nn.jl).
+    warmstart::Symbol = :euler
+    nn_weights::String = ""
 
-    # Run identifier
-    suffix::String = "LB2D_v3"
+    # Stream per-step training data (v, v̇, G, L_vec) to
+    # training_dump_<suffix>.bin (~1 MB/step at N=40k). Consumed by
+    # probe_delta_predictability.jl / train_warmstart.jl.
+    dump_training::Bool = false
 
-    # RNG seed
+    # `v1_peak == 0` → single anisotropic Gaussian N(0, diag(σ1², σ2²)).
+    # `v1_peak  > 0` → bimodal in v₁: balanced 50/50 mixture of
+    #                  N(±v1_peak, σ1²) in v₁, with v₂ ~ N(0, σ2²).
+    # (Ported from the bimodal-v1 branch.)
+    v1_peak::Float64 = 0.0
+
+    # Run the O(N²) Landau collision sum on the GPU (CUDA.jl, Float64).
+    # Loads collision_gpu.jl on demand; CPU runs never touch CUDA.
+    use_gpu::Bool = false
+
+    # EXPERIMENT: Float32 pair math in the GPU collision kernel (accumulation
+    # per slice FP32, reduction FP64). Degrades U(d)·d=0 to FP32 roundoff ⇒
+    # measurable energy drift; exists to quantify the speed/conservation
+    # trade. Requires use_gpu=true. Projection stays FP64.
+    gpu_fp32::Bool = false
+
+    # Run identifier (used in output file names)
+    suffix::String = "anderson"
+
+    # Random seed (so independent runs use the same particle IC)
     seed::Int = 42
 end
 
+# Parse a single CLI token of the form "--key=val". The space-separated form
+# would require sequential scanning; we only support the equals form to keep
+# the parser stateless and easy to read.
 function _parse_override_token(tok::AbstractString)
     startswith(tok, "--") || return nothing
     eq = findfirst('=', tok)
     eq === nothing && error("CLI override $tok must use --key=value form")
-    key = Symbol(tok[3:(eq - 1)])
-    val_str = tok[(eq + 1):end]
+    key = Symbol(tok[3:eq-1])
+    val_str = tok[eq+1:end]
     return key, val_str
 end
 
+# Coerce a string into the field's declared type. Bool accepts true/false/1/0;
+# strings pass through; numeric types use parse(T, s). Vector fields are
+# rejected at the call site — too clumsy to express on the CLI.
 function _coerce(::Type{T}, s::AbstractString) where {T}
     if T === Bool
-        s in ("true", "1") && return true
+        s in ("true", "1")  && return true
         s in ("false", "0") && return false
         error("Cannot parse $s as Bool")
+    elseif T === Symbol
+        return Symbol(s)
     elseif T <: AbstractString
         return String(s)
     elseif T <: AbstractVector
@@ -82,11 +141,17 @@ function _coerce(::Type{T}, s::AbstractString) where {T}
     end
 end
 
+"""
+    parse_overrides(p::SimParameters, args)
+
+Apply every `--key=value` token in `args` on top of `p`, returning a new
+`SimParameters`. Unknown keys raise. Empty `args` returns `p` unchanged.
+"""
 function parse_overrides(p::SimParameters, args)
     isempty(args) && return p
     fields = fieldnames(SimParameters)
     field_type = Dict(f => fieldtype(SimParameters, f) for f in fields)
-    overrides = Dict{Symbol,Any}()
+    overrides = Dict{Symbol, Any}()
     for tok in args
         parsed = _parse_override_token(tok)
         parsed === nothing && continue
@@ -97,32 +162,27 @@ function parse_overrides(p::SimParameters, args)
     return SimParameters(; (f => get(overrides, f, getfield(p, f)) for f in fields)...)
 end
 
+"""
+    print_summary(p::SimParameters)
+
+One-shot human-readable dump of the active configuration. Used at the top of
+each run so the .log captures exactly what was run.
+"""
 function print_summary(p::SimParameters)
     n1, n2 = length(p.bp1) - 1, length(p.bp2) - 1
     dv1_min, dv1_max = extrema(diff(p.bp1))
     dv2_min, dv2_max = extrema(diff(p.bp2))
-    println("==== SimParameters (LB 2D) ====")
+    println("==== SimParameters ====")
     println("v₁ ∈ [$(p.bp1[1]), $(p.bp1[end])]  cells=$n1  Δv₁ ∈ [$dv1_min, $dv1_max]")
     println("v₂ ∈ [$(p.bp2[1]), $(p.bp2[end])]  cells=$n2  Δv₂ ∈ [$dv2_min, $dv2_max]")
     println("P_DEG=$(p.P_DEG)  K_REG=$(p.K_REG)  N_QUAD=$(p.N_QUAD)")
     println("N_PARTICLES=$(p.N_PARTICLES)  σ=($(p.σ1), $(p.σ2))  seed=$(p.seed)")
-    println("ν=$(p.nu)  DT=$(p.DT)  N_STEPS=$(p.N_STEPS)  T_final=$(p.DT * p.N_STEPS)")
-    println(
-        "solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *
-        "  damping=$(p.damping)  tol=$(p.tol)  max_iter=$(p.max_iter)",
-    )
+    println("DT=$(p.DT)  N_STEPS=$(p.N_STEPS)")
+    println("solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *
+            "  damping=$(p.damping)  tol=$(p.tol)  max_iter=$(p.max_iter)")
+    println("collision=$(p.collision_model)$(p.collision_model == :lb ? "  ν=$(p.nu)" : "")" *
+            "  disc_grad=$(p.use_gonzalez ? "Gonzalez" : "plain-midpoint")" *
+            "  entropy_integrand=$(p.use_logsq ? "½log f²" : "clamped log f")")
     println("suffix=$(p.suffix)")
-    return println("===============================")
-end
-
-# Sample initial particle velocities: anisotropic centered Gaussian. Returns
-# an N×2 matrix (rows = particles, cols = (v₁, v₂)).
-function sample_initial_velocities(p::SimParameters, rng=Random.default_rng())
-    σ1 = p.σ1
-    σ2 = p.σ2
-    N = p.N_PARTICLES
-
-    v1 = σ1 * randn(rng, N)
-    v2 = σ2 * randn(rng, N)
-    return [v1 v2]
+    println("=======================")
 end

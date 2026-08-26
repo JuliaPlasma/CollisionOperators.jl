@@ -1,21 +1,22 @@
-# # MantisWrappers (2D)
+# # MantisWrappers
 #
-# Wraps Mantis FEM for 2D velocity-space tensor-product B-spline projection used
-# by the conservative Lenard-Bernstein collision operator (Jeyakumar et al.
-# 2024). Ported from the 1D LB wrapper + the 2D Landau (Gonzalez) wrapper: the
-# FEM scaffolding (tensor-product space, anisotropic bp1/bp2, 2-component
-# gradient eval) is shared with Landau; the exported physics is LB-specific.
+# Wraps the Mantis FEM library for particle-to-B-spline projection, entropy
+# computation, and Landau collision operators on a 2D Cartesian velocity
+# domain.
 #
-# All FEM state held in a single `Workspace` struct constructed from a
-# `SimParameters` instance. No module-level globals depend on parameters.
+# Refactored to hold all FEM state in a single `Workspace` struct constructed
+# from a `SimParameters` instance. No module-level globals depend on
+# parameters.
 
 module MantisWrappers
 
 using Mantis
-using Random
 using LinearAlgebra
 using LinearAlgebra: mul!, lu
 
+# `SimParameters` is defined in Parameters.jl, included by main.jl
+# *before* this module is loaded. We forward-declare via a parameter alias so
+# Workspace can reference the type without re-including the file.
 include("Parameters.jl")
 
 # ## Bézier-extraction scratch buffers (per dimension, sized by P_DEG)
@@ -29,30 +30,19 @@ ParticleBuf(p_deg::Int) = ParticleBuf(zeros(p_deg+1), zeros(p_deg+1),
                                        zeros(p_deg+1), zeros(p_deg+1))
 
 # ## Workspace
-"""
-    Workspace
-
-Immutable container holding the FEM scaffolding (mesh, basis, factorization) plus
-per-particle scratch reused across every step. The struct is immutable, so no
-field binding is ever reassigned — but the scratch buffers' *array contents* are
-overwritten in place each evaluation.
-
-Mutated in place (per-particle scratch, single-threaded):
-  `pbuf1`, `pbuf2` (their `.B`/`.dB`/`.phi`/`.dphi`), `lp_vals`, `lp_gids`,
-  `G_vals`, `G_dxi1`, `G_dxi2`, `G_gids`.
-
-Read-only after `build_workspace` (mesh / basis / factorization, fixed for the run):
-  `p`, `bp1`, `bp2`, `geo_2d`, `X⁰`, `n_dofs`, `n_elements`, `lin_indices`,
-  `M_lu`, `qrule_integrate`, `ext1d_1`, `ext1d_2`, `basis_start_1d_1`,
-  `basis_start_1d_2`, `n_dofs_1d_1`, `n_dofs_1d_2`, `lin_dofs_2d`.
-"""
+#
+# Holds geometry, function spaces, mass-matrix LU, quadrature rule, Bézier
+# extraction caches, and per-particle / per-DOF scratch arrays. One instance
+# is built per simulation run.
 struct Workspace{G, X, L, Q, E1, E2}
+    # Parameters echoed for convenience (so functions don't need both args)
     p::SimParameters
 
     # Anisotropic breakpoint vectors (length n_elem_d + 1)
     bp1::Vector{Float64}
     bp2::Vector{Float64}
 
+    # Function-space objects (parametric to preserve concrete types)
     geo_2d::G
     X⁰::X
     n_dofs::Int
@@ -62,10 +52,10 @@ struct Workspace{G, X, L, Q, E1, E2}
     # Mass-matrix LU factorization
     M_lu::L
 
-    # Quadrature rule (2D, used for entropy / negative-part integration)
+    # Quadrature rule for entropy / r-vector integration
     qrule_integrate::Q
 
-    # Bézier extraction cache, per dimension
+    # Bézier extraction cache, per dimension (concrete element type via E1/E2)
     ext1d_1::Vector{E1}
     ext1d_2::Vector{E2}
     basis_start_1d_1::Vector{Int}
@@ -74,7 +64,9 @@ struct Workspace{G, X, L, Q, E1, E2}
     n_dofs_1d_2::Int
     lin_dofs_2d::LinearIndices{2, Tuple{Base.OneTo{Int}, Base.OneTo{Int}}}
 
-    # Per-particle scratch (single-threaded; LB has no pairwise kernel)
+    # Per-particle scratch (single-threaded — locate_particle / l2_project /
+    # compute_G! all run serial; compute_collision! threads but doesn't touch
+    # the spline machinery)
     pbuf1::ParticleBuf
     pbuf2::ParticleBuf
     lp_vals::Vector{Float64}
@@ -85,6 +77,14 @@ struct Workspace{G, X, L, Q, E1, E2}
     G_gids::Vector{Int}
 end
 
+"""
+    build_workspace(p::SimParameters)
+
+Construct geometry, function space, mass matrix, quadrature, and all
+preallocated scratch from the configuration `p`. Each velocity dimension uses
+its own breakpoint vector supplied by `p.bp1`, `p.bp2` (anisotropic, possibly
+non-uniform). The breakpoints are aliased into the workspace without copying.
+"""
 function build_workspace(p::SimParameters)
     bp1 = p.bp1
     bp2 = p.bp2
@@ -131,6 +131,7 @@ function build_workspace(p::SimParameters)
     n_dofs_1d_2 = FunctionSpaces.get_num_basis(B_1d_2)
     lin_dofs_2d = LinearIndices((n_dofs_1d_1, n_dofs_1d_2))
 
+    # Scratch
     pbuf1 = ParticleBuf(p.P_DEG)
     pbuf2 = ParticleBuf(p.P_DEG)
     nloc = (p.P_DEG + 1)^2
@@ -206,22 +207,7 @@ function _bernstein_eval!(B::AbstractVector, dB::AbstractVector, p::Int, ξ::Flo
     return nothing
 end
 
-"""
-    fast_eval_particle!(ws, vals, gids, loc) -> k
-
-Fill `vals` and `gids` with the tensor-product basis values φ_{j1,j2}(ξ) and
-their global DOF indices on element/coords `loc`. Returns the local DOF count `k`.
-
-The *result* is written only to the caller-supplied `vals`/`gids`; the function
-is logically pure in that sense. But it also overwrites the per-particle scratch
-fields of `ws` — `ws.pbuf1`/`ws.pbuf2` (`.B`, `.dB`, `.phi`) — which hold the
-intermediate 1D Bernstein values. This reuses pre-allocated buffers instead of
-allocating fresh temporaries on every call, keeping the hot particle loop
-allocation-free. All other `ws` fields (mesh/connectivity) are read-only here.
-
-Because that scratch is shared mutable state, this routine is **single-threaded
-only**: running it concurrently over particles races on `ws.pbuf*`.
-"""
+# Fill `vals` and `gids` with φ_{j1,j2}(ξ) and global DOF indices on `loc`.
 function fast_eval_particle!(ws::Workspace,
                               vals::AbstractVector, gids::AbstractVector,
                               loc::ParticleLocation)
@@ -284,7 +270,8 @@ function fast_eval_particle_grad!(ws::Workspace,
     return k
 end
 
-# Sample f_s on a 2D Cartesian grid (heatmap rendering). Outside domain → 0.
+# Sample f_s on a 2D Cartesian grid (e.g. for heatmap rendering). Points
+# outside the domain → 0.
 function evaluate_on_grid(ws::Workspace, field::Forms.FormField,
                           v1_grid::AbstractVector, v2_grid::AbstractVector)
     nv1 = length(v1_grid); nv2 = length(v2_grid)
@@ -300,17 +287,20 @@ function evaluate_on_grid(ws::Workspace, field::Forms.FormField,
     return F
 end
 
-export SimParameters, parse_overrides, print_summary, sample_initial_velocities
+export SimParameters, parse_overrides, print_summary
 export Workspace, build_workspace
 export ParticleLocation, locate_particle, evaluate, build_field, element_measure
 export fast_eval_particle!, fast_eval_particle_grad!
 export evaluate_on_grid
 
+# Physics routines (l2_project!, compute_entropy, compute_r!, compute_G!,
+# compute_collision!) plus diagnostics (compute_negative_part,
+# compute_fp_minus_fs_l2). All take `ws::Workspace` as first argument.
 include("functions.jl")
 
-export l2_project!, compute_entropy
-export eval_loggrad_at_particles!, compute_moments, compute_drift_multipliers
-export compute_LB_velocity!
+export compute_entropy, compute_r!, compute_G!, compute_collision!, l2_project!
+export eval_loggrad_at_particles!, compute_moments, compute_drift_multipliers, compute_LB_velocity!
 export compute_negative_part_l1, compute_fs_minus_fp_l2
+export USE_LOGSQ
 
 end # module
