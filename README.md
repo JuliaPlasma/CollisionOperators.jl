@@ -115,12 +115,12 @@ Vector fields (`bp1`, `bp2`) are not CLI-overridable — edit the preset.
 ### Examples — Landau operator
 
 Two representative Landau runs (`collision_model=:landau`, Gonzalez integrator,
-N = 40 000 markers, Δt = 0.001). Both conserve energy and momentum to the
-solver floor and increase the discrete entropy monotonically.
+Δt = 0.001). Both conserve energy and momentum to the solver floor and increase
+the discrete entropy monotonically.
 
-**Anisotropic → isotropic.** A single anisotropic Gaussian (σ₁ = 4/3, σ₂ = 1/2)
-relaxes to an isotropic Maxwellian. Entropy rises monotonically while energy is
-conserved to `|ΔE|/E₀ ≲ 10⁻¹¹` and momentum to `≲ 10⁻¹⁴`:
+**Anisotropic → isotropic.** A single anisotropic Gaussian (σ₁ = 4/3, σ₂ = 1/2,
+40 000 markers) relaxes to an isotropic Maxwellian. Entropy rises monotonically
+while energy is conserved to `|ΔE|/E₀ ≲ 10⁻¹¹` and momentum to `≲ 10⁻¹⁴`:
 
 ![Landau anisotropic→isotropic conservation](assets/landau_aniso_conservation.png)
 
@@ -128,13 +128,19 @@ The distribution becomes round by t ≈ 2.5 (the elongation along v₁ washes ou
 
 ![Landau anisotropic→isotropic density evolution](assets/landau_aniso_distribution.png)
 
-**Bimodal relaxation.** A 50/50 mixture of `N(±2, 1)` in v₁ merges into a single
-centred Maxwellian. Entropy is monotone all the way to t ≈ 20 with the same
-machine-precision conservation:
+**Bimodal relaxation.** Two counter-streaming beams — a 50/50 mixture of
+`N(±2, 1)` in v₁ with v₂ ~ `N(0, 1)` (10 000 markers) — merge into a single
+centred Maxwellian. Momentum conservation forces the bulk velocity to zero, so
+all of the directed kinetic energy is converted into heat: the equilibrium is
+**isotropic with σ = √3 ≈ 1.732** (⟨v²⟩ = μ² + σ₁² + σ₂² = 6 is conserved).
+Entropy is monotone all the way to t ≈ 20 with the same machine-precision
+conservation:
 
 ![Landau bimodal conservation](assets/landau_bimodal_conservation.png)
 
-The two peaks coalesce into one Gaussian:
+The two peaks coalesce into a single round Gaussian spanning ≈ ±5 in both axes
+by t ≈ 20 — the mesh is sized symmetrically so the isotropic equilibrium is
+resolved without distortion:
 
 ![Landau bimodal density evolution](assets/landau_bimodal_distribution.png)
 
