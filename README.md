@@ -112,6 +112,32 @@ julia --project=. main.jl parameters_sq_d04.jl --resume=auto
 `ARGS[1]` is the preset file; `ARGS[2:]` are `--key=value` scalar overrides.
 Vector fields (`bp1`, `bp2`) are not CLI-overridable — edit the preset.
 
+### Examples — Landau operator
+
+Two representative Landau runs (`collision_model=:landau`, Gonzalez integrator,
+N = 40 000 markers, Δt = 0.001). Both conserve energy and momentum to the
+solver floor and increase the discrete entropy monotonically.
+
+**Anisotropic → isotropic.** A single anisotropic Gaussian (σ₁ = 4/3, σ₂ = 1/2)
+relaxes to an isotropic Maxwellian. Entropy rises monotonically while energy is
+conserved to `|ΔE|/E₀ ≲ 10⁻¹¹` and momentum to `≲ 10⁻¹⁴`:
+
+![Landau anisotropic→isotropic conservation](assets/landau_aniso_conservation.png)
+
+The distribution becomes round by t ≈ 2.5 (the elongation along v₁ washes out):
+
+![Landau anisotropic→isotropic density evolution](assets/landau_aniso_distribution.png)
+
+**Bimodal relaxation.** A 50/50 mixture of `N(±2, 1)` in v₁ merges into a single
+centred Maxwellian. Entropy is monotone all the way to t ≈ 20 with the same
+machine-precision conservation:
+
+![Landau bimodal conservation](assets/landau_bimodal_conservation.png)
+
+The two peaks coalesce into one Gaussian:
+
+![Landau bimodal density evolution](assets/landau_bimodal_distribution.png)
+
 ### Output (per `suffix`)
 
 - `conservation_history_<suffix>.csv` — one row per step:
