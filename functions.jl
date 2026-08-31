@@ -35,7 +35,7 @@ const G_MAX = 100.0
 # Each component clamped to ±G_MAX; out-of-domain particles → g = 0 (drift
 # reduces to A + B v, keeping the moment-conservation algebra consistent).
 function eval_loggrad_at_particles!(ws::Workspace, g::AbstractMatrix,
-                                    v_parts, f_coeffs)
+        v_parts, f_coeffs)
     nloc = (ws.p.P_DEG + 1)^2
     @inbounds for α in axes(v_parts, 1)
         loc = locate_particle(ws, v_parts[α, 1], v_parts[α, 2])
@@ -47,10 +47,12 @@ function eval_loggrad_at_particles!(ws::Workspace, g::AbstractMatrix,
         fast_eval_particle_grad!(ws, ws.G_vals, ws.G_dxi1, ws.G_dxi2, ws.G_gids, loc)
         inv_h1 = 1.0 / loc.h1
         inv_h2 = 1.0 / loc.h2
-        f = 0.0; d1 = 0.0; d2 = 0.0
+        f = 0.0
+        d1 = 0.0
+        d2 = 0.0
         for j in 1:nloc
             c = f_coeffs[ws.G_gids[j]]
-            f  += c * ws.G_vals[j]
+            f += c * ws.G_vals[j]
             d1 += c * ws.G_dxi1[j] * inv_h1
             d2 += c * ws.G_dxi2[j] * inv_h2
         end
@@ -64,14 +66,18 @@ end
 # Raw weighted particle moments: n = Σw, U = Σw v, Q = Σw|v|². Feeds the 3×3
 # drift-multiplier solve.
 function compute_moments(v_parts, w_parts)
-    n = 0.0; U1 = 0.0; U2 = 0.0; Q = 0.0
+    n = 0.0
+    U1 = 0.0
+    U2 = 0.0
+    Q = 0.0
     @inbounds for α in axes(v_parts, 1)
         w = w_parts[α]
-        a = v_parts[α, 1]; b = v_parts[α, 2]
-        n  += w
+        a = v_parts[α, 1]
+        b = v_parts[α, 2]
+        n += w
         U1 += w * a
         U2 += w * b
-        Q  += w * (a^2 + b^2)
+        Q += w * (a^2 + b^2)
     end
     return n, U1, U2, Q
 end
@@ -83,17 +89,20 @@ end
 #   [ U1 U2 Q  ][B ]   [ P   ]
 # with Sg = Σ w_α g_α, P = Σ w_α v_α·g_α.
 function compute_drift_multipliers(v_parts, w_parts, g, n, U1, U2, Q)
-    Sg1 = 0.0; Sg2 = 0.0; P = 0.0
+    Sg1 = 0.0
+    Sg2 = 0.0
+    P = 0.0
     @inbounds for α in axes(v_parts, 1)
-        g1 = g[α, 1]; g2 = g[α, 2]
+        g1 = g[α, 1]
+        g2 = g[α, 2]
         w = w_parts[α]
         Sg1 += w * g1
         Sg2 += w * g2
-        P   += w * (v_parts[α, 1] * g1 + v_parts[α, 2] * g2)
+        P += w * (v_parts[α, 1] * g1 + v_parts[α, 2] * g2)
     end
     Mmat = [n 0.0 U1; 0.0 n U2; U1 U2 Q]
-    rhs  = [-Sg1, -Sg2, -P]
-    sol  = Mmat \ rhs
+    rhs = [-Sg1, -Sg2, -P]
+    sol = Mmat \ rhs
     return sol[1], sol[2], sol[3]   # A1, A2, B
 end
 
@@ -162,7 +171,7 @@ function compute_r!(ws::Workspace, r, field::Forms.FormField)
             end
             for (j, gidx) in enumerate(indices[1])
                 r[gidx] += integrand * evals[1][q, j] *
-                          ws.qrule_integrate.weights[q] * jac
+                           ws.qrule_integrate.weights[q] * jac
             end
         end
     end
@@ -179,7 +188,8 @@ function compute_G!(ws::Workspace, G, v_parts, L_vec)
         fast_eval_particle_grad!(ws, ws.G_vals, ws.G_dxi1, ws.G_dxi2, ws.G_gids, loc)
         inv_h1 = 1.0 / loc.h1
         inv_h2 = 1.0 / loc.h2
-        acc1 = 0.0; acc2 = 0.0
+        acc1 = 0.0
+        acc2 = 0.0
         @inbounds for j in 1:nloc
             L = L_vec[ws.G_gids[j]]
             acc1 += L * ws.G_dxi1[j] * inv_h1
@@ -256,7 +266,7 @@ end
 #     Gibbs oscillation amplitude *and* the cell-to-cell mass-distribution
 #     mismatch that drives spurious gradients via L = M⁻¹ r.
 function compute_fs_minus_fp_l2(ws::Workspace, field::Forms.FormField,
-                                 v_parts::AbstractMatrix, w_parts::AbstractVector)
+        v_parts::AbstractMatrix, w_parts::AbstractVector)
     # Per-element particle mass:  m_e = Σ_{α ∈ e} w_α
     elem_mass = zeros(ws.n_elements)
     for α in axes(v_parts, 1)

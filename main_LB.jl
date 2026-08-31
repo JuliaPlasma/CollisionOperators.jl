@@ -34,13 +34,16 @@ using LinearAlgebra: ldiv!, mul!
 struct RunHistory
     entropy::Vector{Float64}
     energy::Vector{Float64}
-    momentum::Vector{NTuple{2,Float64}}
+    momentum::Vector{NTuple{2, Float64}}
     iter::Vector{Int}
     res::Vector{Float64}
     fp_l2::Vector{Float64}
     neg::Vector{Float64}
 end
-RunHistory() = RunHistory(Float64[], Float64[], NTuple{2,Float64}[], Int[], Float64[], Float64[], Float64[])
+function RunHistory()
+    RunHistory(
+        Float64[], Float64[], NTuple{2, Float64}[], Int[], Float64[], Float64[], Float64[])
+end
 
 # Append one evolution step's diagnostics.
 function push_step!(h::RunHistory, entropy, energy, momentum, iter, res, fp_l2, neg)
@@ -60,7 +63,7 @@ function checkpoint_path(suffix::String, step::Int)
 end
 
 function save_checkpoint(
-    suffix::String, step::Int, v_particles, w_particles, f_coeffs, h::RunHistory, rng_state
+        suffix::String, step::Int, v_particles, w_particles, f_coeffs, h::RunHistory, rng_state
 )
     fname = checkpoint_path(suffix, step)
     # Serialize the flat `*_history` NamedTuple shape (not RunHistory) so old
@@ -73,15 +76,15 @@ function save_checkpoint(
                 v_particles,
                 w_particles,
                 f_coeffs,
-                entropy_history=h.entropy,
-                energy_history=h.energy,
-                momentum_history=h.momentum,
-                iter_history=h.iter,
-                res_history=h.res,
-                fp_l2_history=h.fp_l2,
-                neg_history=h.neg,
-                rng_state,
-            ),
+                entropy_history = h.entropy,
+                energy_history = h.energy,
+                momentum_history = h.momentum,
+                iter_history = h.iter,
+                res_history = h.res,
+                fp_l2_history = h.fp_l2,
+                neg_history = h.neg,
+                rng_state
+            )
         )
     end
     println("Saved $fname")
@@ -97,7 +100,7 @@ function history_from_checkpoint(ckpt)
         ckpt.iter_history,
         ckpt.res_history,
         ckpt.fp_l2_history,
-        ckpt.neg_history,
+        ckpt.neg_history
     )
 end
 
@@ -159,35 +162,35 @@ Read-only: `v0` (base velocities, fixed during the solve), `w_parts`, `dt`,
 and all scalar keyword args.
 """
 function step_anderson!(
-    ws::Workspace,
-    v1,
-    v0,
-    w_parts,
-    dt,
-    v_mid,
-    f_coeffs,
-    g,
-    dot_v,
-    Gv,
-    r_curr,
-    r_prev,
-    Gv_prev,
-    v_old,
-    ΔF,
-    ΔG;
-    m=5,
-    max_iter=1000,
-    tol=1e-12,
-    abs_floor=1e-10,
-    stag_window=50,
-    stag_rel_tol=0.01,
-    damp_decay_start=200,
-    damp_decay_factor=0.5,
-    restart_factor=Inf,
-    damping=0.5,
-    reg_factor=1e-10,
-    verbose=false,
-    use_anderson::Bool=true,
+        ws::Workspace,
+        v1,
+        v0,
+        w_parts,
+        dt,
+        v_mid,
+        f_coeffs,
+        g,
+        dot_v,
+        Gv,
+        r_curr,
+        r_prev,
+        Gv_prev,
+        v_old,
+        ΔF,
+        ΔG;
+        m = 5,
+        max_iter = 1000,
+        tol = 1e-12,
+        abs_floor = 1e-10,
+        stag_window = 50,
+        stag_rel_tol = 0.01,
+        damp_decay_start = 200,
+        damp_decay_factor = 0.5,
+        restart_factor = Inf,
+        damping = 0.5,
+        reg_factor = 1e-10,
+        verbose = false,
+        use_anderson::Bool = true
 )
     v1_v = vec(v1)
     Gv_v = vec(Gv)
@@ -226,7 +229,8 @@ function step_anderson!(
             rel_improve = (nrm_best_window - nrm_best) / (nrm_best_window + 1e-30)
             if rel_improve < stag_rel_tol
                 v1 .= Gv_best
-                verbose && println("    k=$k  stagnated  nrm_best=$nrm_best  Δ_rel=$rel_improve")
+                verbose &&
+                    println("    k=$k  stagnated  nrm_best=$nrm_best  Δ_rel=$rel_improve")
                 return k, nrm_best, n_restart
             end
             nrm_best_window = nrm_best
@@ -239,7 +243,8 @@ function step_anderson!(
             just_restarted = true
         end
 
-        verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history" * (just_restarted ? "  [restart]" : ""))
+        verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history" *
+                (just_restarted ? "  [restart]" : ""))
 
         damping_eff = k > damp_decay_start ? damping * damp_decay_factor : damping
 
@@ -292,7 +297,8 @@ function compute_momentum(v_parts, w_parts)
 end
 
 function compute_energy(v_parts, w_parts)
-    return 0.5 * sum(w_parts[α] * (v_parts[α, 1]^2 + v_parts[α, 2]^2) for α in axes(v_parts, 1))
+    return 0.5 *
+           sum(w_parts[α] * (v_parts[α, 1]^2 + v_parts[α, 2]^2) for α in axes(v_parts, 1))
 end
 
 function save_fs_snapshot(ws::Workspace, suffix::String, step::Int, f_coeffs::AbstractVector)
@@ -312,39 +318,40 @@ end
 # Per-snapshot dashboard: f_s(v₁_fixed, v₂) slices + log10|f_s| heatmap with a
 # negative-region mask overlay (the honeycomb probe).
 function plot_fs_diagnostics(
-    ws::Workspace,
-    f_coeffs::AbstractVector,
-    suffix::String,
-    step::Int;
-    v1_slices::Vector{Float64}=[0.0, 0.5, 1.0],
-    n_v2::Int=400,
-    n_grid::Int=200,
+        ws::Workspace,
+        f_coeffs::AbstractVector,
+        suffix::String,
+        step::Int;
+        v1_slices::Vector{Float64} = [0.0, 0.5, 1.0],
+        n_v2::Int = 400,
+        n_grid::Int = 200
 )
     p = ws.p
     f_s = build_field(ws, f_coeffs)
 
-    v2_grid = collect(range(p.bp2[1], p.bp2[end]; length=n_v2))
-    fig = Figure(; size=(1300, 900))
+    v2_grid = collect(range(p.bp2[1], p.bp2[end]; length = n_v2))
+    fig = Figure(; size = (1300, 900))
     ax_slice = Axis(
-        fig[1, 1:2]; xlabel="v₂", ylabel="f_s", title="f_s slices along v₂  (suffix=$suffix, step=$step)"
+        fig[1, 1:2]; xlabel = "v₂", ylabel = "f_s",
+        title = "f_s slices along v₂  (suffix=$suffix, step=$step)"
     )
     palette = [:blue, :red, :green, :purple]
     for (i, v1f) in enumerate(v1_slices)
-        vals = [
-            begin
-                loc = locate_particle(ws, v1f, v2)
-                isnothing(loc) ? 0.0 : (evaluate(ws, f_s, loc)[1][1][1])
-            end for v2 in v2_grid
-        ]
+        vals = [begin
+                    loc = locate_particle(ws, v1f, v2)
+                    isnothing(loc) ? 0.0 : (evaluate(ws, f_s, loc)[1][1][1])
+                end
+                for v2 in v2_grid]
         lines!(
-            ax_slice, v2_grid, vals; color=palette[mod1(i, length(palette))], linewidth=2, label="v₁ = $v1f"
+            ax_slice, v2_grid, vals; color = palette[mod1(i, length(palette))],
+            linewidth = 2, label = "v₁ = $v1f"
         )
     end
-    hlines!(ax_slice, [0.0]; color=:black, linestyle=:dash, linewidth=1)
-    axislegend(ax_slice; position=:rt)
+    hlines!(ax_slice, [0.0]; color = :black, linestyle = :dash, linewidth = 1)
+    axislegend(ax_slice; position = :rt)
 
-    v1_grid = collect(range(p.bp1[1], p.bp1[end]; length=n_grid))
-    v2_grid_h = collect(range(p.bp2[1], p.bp2[end]; length=n_grid))
+    v1_grid = collect(range(p.bp1[1], p.bp1[end]; length = n_grid))
+    v2_grid_h = collect(range(p.bp2[1], p.bp2[end]; length = n_grid))
     F = evaluate_on_grid(ws, f_s, v1_grid, v2_grid_h)
 
     F_log = similar(F)
@@ -352,17 +359,20 @@ function plot_fs_diagnostics(
         a = abs(F[I])
         F_log[I] = a > 1e-30 ? log10(a) : -30.0
     end
-    ax_h = Axis(fig[2, 1]; xlabel="v₁", ylabel="v₂", title="log10|f_s|", aspect=DataAspect())
-    hm = heatmap!(ax_h, v1_grid, v2_grid_h, F_log; colormap=:viridis)
+    ax_h = Axis(fig[2, 1]; xlabel = "v₁", ylabel = "v₂",
+        title = "log10|f_s|", aspect = DataAspect())
+    hm = heatmap!(ax_h, v1_grid, v2_grid_h, F_log; colormap = :viridis)
     Colorbar(fig[2, 1, Right()], hm)
 
     neg_mask = map(x -> x < 0.0 ? 1.0 : NaN, F)
     ax_n = Axis(
-        fig[2, 2]; xlabel="v₁", ylabel="v₂", title="negative-region mask (red = f_s < 0)", aspect=DataAspect()
+        fig[2, 2]; xlabel = "v₁", ylabel = "v₂",
+        title = "negative-region mask (red = f_s < 0)", aspect = DataAspect()
     )
-    hm2 = heatmap!(ax_n, v1_grid, v2_grid_h, F_log; colormap=:viridis)
+    hm2 = heatmap!(ax_n, v1_grid, v2_grid_h, F_log; colormap = :viridis)
     Colorbar(fig[2, 2, Right()], hm2)
-    heatmap!(ax_n, v1_grid, v2_grid_h, neg_mask; colormap=[:transparent, :red], colorrange=(0.0, 1.0))
+    heatmap!(ax_n, v1_grid, v2_grid_h, neg_mask;
+        colormap = [:transparent, :red], colorrange = (0.0, 1.0))
 
     png_name = "fs_diag_$(suffix)_step$(lpad(step, 5, '0')).png"
     save(png_name, fig)
@@ -373,7 +383,8 @@ end
 # ---- Streaming I/O helpers --------------------------------------------------
 # Single source for the conservation-CSV row schema (init row + per-step row).
 function write_cons_row(io, step, t, entropy, energy, momentum, iter, res, fp_l2, neg)
-    println(io, "$step,$t,$entropy,$energy,$(momentum[1]),$(momentum[2])," * "$iter,$res,$fp_l2,$neg")
+    println(io, "$step,$t,$entropy,$energy,$(momentum[1]),$(momentum[2])," *
+                "$iter,$res,$fp_l2,$neg")
     flush(io)
     return nothing
 end
@@ -388,15 +399,17 @@ end
 
 # Everything written at a snapshot step: f_s CSV + diagnostic PNG + particle dump
 # + checkpoint. Runs identically at step 0 and inside the loop.
-function take_snapshot(ws, p, step, f_coeffs, v_particles, w_particles, h::RunHistory, snap_io)
+function take_snapshot(
+        ws, p, step, f_coeffs, v_particles, w_particles, h::RunHistory, snap_io)
     save_fs_snapshot(ws, p.suffix, step, f_coeffs)
     plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
     dump_particles(snap_io, step, step * p.DT, v_particles)
-    save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs, h, copy(Random.default_rng()))
+    save_checkpoint(
+        p.suffix, step, v_particles, w_particles, f_coeffs, h, copy(Random.default_rng()))
     return nothing
 end
 
-function run_simulation(p::SimParameters; resume=nothing)
+function run_simulation(p::SimParameters; resume = nothing)
     print_summary(p)
     Random.seed!(p.seed)
 
@@ -419,7 +432,8 @@ function run_simulation(p::SimParameters; resume=nothing)
             error("Checkpoint N_PARTICLES=$(size(v_particles,1)) ≠ preset N_PARTICLES=$(p.N_PARTICLES)")
         length(f_coeffs) == ws.n_dofs ||
             error("Checkpoint n_dofs=$(length(f_coeffs)) ≠ workspace n_dofs=$(ws.n_dofs); mesh changed?")
-        start_step < p.N_STEPS || error("Checkpoint step=$start_step ≥ N_STEPS=$(p.N_STEPS); nothing to do")
+        start_step < p.N_STEPS ||
+            error("Checkpoint step=$start_step ≥ N_STEPS=$(p.N_STEPS); nothing to do")
 
         println("Resuming from step $start_step (running through $(p.N_STEPS))")
     else
@@ -465,7 +479,8 @@ function run_simulation(p::SimParameters; resume=nothing)
     if start_step == 0
         cons_io = open(cons_csv, "w")
         println(
-            cons_io, "step,time,entropy,energy,momentum_1,momentum_2," * "iter,residual,fp_minus_fs,neg_part"
+            cons_io, "step,time,entropy,energy,momentum_1,momentum_2," *
+                     "iter,residual,fp_minus_fs,neg_part"
         )
         write_cons_row(
             cons_io,
@@ -477,7 +492,7 @@ function run_simulation(p::SimParameters; resume=nothing)
             0,
             0.0,
             fs_minus_fp_l2,
-            neg_part,
+            neg_part
         )
 
         snap_io = open(snap_csv, "w")
@@ -495,7 +510,8 @@ function run_simulation(p::SimParameters; resume=nothing)
             l2_project!(ws, f_buf, v_particles, w_particles)
             eval_loggrad_at_particles!(ws, g, v_particles, f_buf)
             n_h, U1, U2, Q = compute_moments(v_particles, w_particles)
-            A1, A2, B = compute_drift_multipliers(v_particles, w_particles, g, n_h, U1, U2, Q)
+            A1, A2, B = compute_drift_multipliers(
+                v_particles, w_particles, g, n_h, U1, U2, Q)
             compute_LB_velocity!(dot_v, v_particles, g, A1, A2, B, p.nu)
             @. v1 = v_particles + p.DT * dot_v
 
@@ -516,17 +532,17 @@ function run_simulation(p::SimParameters; resume=nothing)
                 v_old_buf,
                 ΔF,
                 ΔG;
-                m=p.m_anderson,
-                max_iter=p.max_iter,
-                tol=p.tol,
-                abs_floor=p.abs_floor,
-                stag_window=p.stag_window,
-                stag_rel_tol=p.stag_rel_tol,
-                damp_decay_start=p.damp_decay_start,
-                damp_decay_factor=p.damp_decay_factor,
-                damping=p.damping,
-                use_anderson=p.use_anderson,
-                verbose=(step <= 3),
+                m = p.m_anderson,
+                max_iter = p.max_iter,
+                tol = p.tol,
+                abs_floor = p.abs_floor,
+                stag_window = p.stag_window,
+                stag_rel_tol = p.stag_rel_tol,
+                damp_decay_start = p.damp_decay_start,
+                damp_decay_factor = p.damp_decay_factor,
+                damping = p.damping,
+                use_anderson = p.use_anderson,
+                verbose = (step <= 3)
             )
             v_particles .= v1
 
@@ -541,7 +557,7 @@ function run_simulation(p::SimParameters; resume=nothing)
                 iter,
                 res_final,
                 compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles),
-                compute_negative_part_l1(ws, f_s),
+                compute_negative_part_l1(ws, f_s)
             )
 
             write_cons_row(
@@ -554,11 +570,12 @@ function run_simulation(p::SimParameters; resume=nothing)
                 iter,
                 res_final,
                 hist.fp_l2[end],
-                hist.neg[end],
+                hist.neg[end]
             )
 
             if step in snapshot_steps
-                take_snapshot(ws, p, step, f_coeffs, v_particles, w_particles, hist, snap_io)
+                take_snapshot(
+                    ws, p, step, f_coeffs, v_particles, w_particles, hist, snap_io)
             end
 
             step % p.snap_every == 0 && println(
@@ -578,18 +595,18 @@ function run_simulation(p::SimParameters; resume=nothing)
     println("Saved $snap_csv")
 
     return (;
-        entropy_history=hist.entropy,
-        energy_history=hist.energy,
-        momentum_history=hist.momentum,
-        iter_history=hist.iter,
-        res_history=hist.res,
-        fp_l2_history=hist.fp_l2,
-        neg_history=hist.neg,
-        label=(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"),
+        entropy_history = hist.entropy,
+        energy_history = hist.energy,
+        momentum_history = hist.momentum,
+        iter_history = hist.iter,
+        res_history = hist.res,
+        fp_l2_history = hist.fp_l2,
+        neg_history = hist.neg,
+        label = (p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")
     )
 end
 
-function main(args=ARGS)
+function main(args = ARGS)
     if isempty(args)
         preset = "parameters_LB2D_v3.jl"
         overrides = String[]
@@ -613,7 +630,7 @@ function main(args=ARGS)
     params_loaded = include(joinpath(@__DIR__, preset))
     p = parse_overrides(params_loaded::SimParameters, overrides)
 
-    res = run_simulation(p; resume=resume)
+    res = run_simulation(p; resume = resume)
     if isempty(res.iter_history)
         println("\n--- No new steps run (already at N_STEPS) ---")
     else

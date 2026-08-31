@@ -37,7 +37,7 @@ snap_csv = "particle_snapshots_$(suffix).csv"
 isfile(snap_csv) || error("Snapshot CSV not found: $snap_csv")
 
 # CSV header: step,time,particle_idx,v1,v2
-data, _ = readdlm(snap_csv, ','; header=true)
+data, _ = readdlm(snap_csv, ','; header = true)
 steps = Int.(@view data[:, 1])
 maxstep = maximum(steps)
 step = want_step < 0 ? maxstep : want_step
@@ -49,25 +49,27 @@ v2 = Float64.(data[mask, 5])
 N = length(v1)
 t = Float64(data[findfirst(mask), 2])
 
-fig = Figure(; size=(1500, 700))
+fig = Figure(; size = (1500, 700))
 
 # Full-domain scatter + mesh overlay
 ax = Axis(fig[1, 1];
-    xlabel="v₁", ylabel="v₂", aspect=DataAspect(),
-    title="LB particle scatter  (suffix=$suffix, step=$step, t=$t, N=$N)")
-vlines!(ax, bp1; color=(:gray, 0.35), linewidth=0.5)
-hlines!(ax, bp2; color=(:gray, 0.35), linewidth=0.5)
-scatter!(ax, v1, v2; markersize=2, color=(:navy, 0.25))
-xlims!(ax, bp1[1], bp1[end]); ylims!(ax, bp2[1], bp2[end])
+    xlabel = "v₁", ylabel = "v₂", aspect = DataAspect(),
+    title = "LB particle scatter  (suffix=$suffix, step=$step, t=$t, N=$N)")
+vlines!(ax, bp1; color = (:gray, 0.35), linewidth = 0.5)
+hlines!(ax, bp2; color = (:gray, 0.35), linewidth = 0.5)
+scatter!(ax, v1, v2; markersize = 2, color = (:navy, 0.25))
+xlims!(ax, bp1[1], bp1[end]);
+ylims!(ax, bp2[1], bp2[end])
 
 # Zoom into the bulk core where spikes/honeycomb would bite physics
 ax2 = Axis(fig[1, 2];
-    xlabel="v₁", ylabel="v₂", aspect=DataAspect(),
-    title="bulk zoom  v₁∈[-4,4], v₂∈[-2.5,2.5]")
-vlines!(ax2, bp1; color=(:gray, 0.4), linewidth=0.6)
-hlines!(ax2, bp2; color=(:gray, 0.4), linewidth=0.6)
-scatter!(ax2, v1, v2; markersize=3, color=(:navy, 0.3))
-xlims!(ax2, -4, 4); ylims!(ax2, -2.5, 2.5)
+    xlabel = "v₁", ylabel = "v₂", aspect = DataAspect(),
+    title = "bulk zoom  v₁∈[-4,4], v₂∈[-2.5,2.5]")
+vlines!(ax2, bp1; color = (:gray, 0.4), linewidth = 0.6)
+hlines!(ax2, bp2; color = (:gray, 0.4), linewidth = 0.6)
+scatter!(ax2, v1, v2; markersize = 3, color = (:navy, 0.3))
+xlims!(ax2, -4, 4);
+ylims!(ax2, -2.5, 2.5)
 
 png_name = "scatter_$(suffix)_step$(lpad(step, 5, '0')).png"
 save(png_name, fig)

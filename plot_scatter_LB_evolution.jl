@@ -23,16 +23,17 @@ struct LBScatterRun
     montage_png::String
 end
 
-LBScatterRun(suffix::AbstractString) =
+function LBScatterRun(suffix::AbstractString)
     LBScatterRun(String(suffix), "particle_snapshots_$(suffix).csv", "scatter_evolution_$(suffix).png")
+end
 
 # cache the parsed CSV so per-panel convert_arguments does not re-read disk
-const _CSV_CACHE = Dict{String,Matrix{Float64}}()
+const _CSV_CACHE = Dict{String, Matrix{Float64}}()
 
 function load_snapshots(path::String)
     get!(_CSV_CACHE, path) do
         isfile(path) || error("Snapshot CSV not found: $path")
-        data, _ = readdlm(path, ',', Float64; header=true)
+        data, _ = readdlm(path, ',', Float64; header = true)
         data
     end
 end
@@ -56,13 +57,14 @@ end
     Makie.mixin_generic_plot_attributes()...
 end
 
-Makie.convert_arguments(::Type{<:LBPanel}, run::LBScatterRun, step::Integer) =
+function Makie.convert_arguments(::Type{<:LBPanel}, run::LBScatterRun, step::Integer)
     (step_points(run.snap_csv, step),)
+end
 
 function Makie.plot!(p::LBPanel)
-    vlines!(p, p.bp1; color=p.meshcolor, linewidth=p.meshwidth)
-    hlines!(p, p.bp2; color=p.meshcolor, linewidth=p.meshwidth)
-    scatter!(p, p.points; markersize=p.markersize, color=p.color)
+    vlines!(p, p.bp1; color = p.meshcolor, linewidth = p.meshwidth)
+    hlines!(p, p.bp2; color = p.meshcolor, linewidth = p.meshwidth)
+    scatter!(p, p.points; markersize = p.markersize, color = p.color)
     return p
 end
 
@@ -73,19 +75,20 @@ function plot_single(lbrun::LBScatterRun, step::Integer)
     i = findfirst(==(step), Int.(@view data[:, 1]))
     t = data[i, 2]
     N = count(==(step), Int.(@view data[:, 1]))
-    fig = Figure(; size=(1500, 700))
+    fig = Figure(; size = (1500, 700))
     ax = Axis(
         fig[1, 1];
-        xlabel="v₁",
-        ylabel="v₂",
-        aspect=DataAspect(),
-        title="LB scatter  (suffix=$(lbrun.suffix), step=$step, t=$t, N=$N)",
+        xlabel = "v₁",
+        ylabel = "v₂",
+        aspect = DataAspect(),
+        title = "LB scatter  (suffix=$(lbrun.suffix), step=$step, t=$t, N=$N)"
     )
-    p = lbpanel!(ax, lbrun, step; markersize=2, color=(:navy, 0.25), meshwidth=0.5)
+    p = lbpanel!(ax, lbrun, step; markersize = 2, color = (:navy, 0.25), meshwidth = 0.5)
     ax2 = Axis(
-        fig[1, 2]; xlabel="v₁", ylabel="v₂", aspect=DataAspect(), title="bulk zoom  v₁∈[-4,4], v₂∈[-2.5,2.5]"
+        fig[1, 2]; xlabel = "v₁", ylabel = "v₂", aspect = DataAspect(),
+        title = "bulk zoom  v₁∈[-4,4], v₂∈[-2.5,2.5]"
     )
-    lbpanel!(ax2, lbrun, step; markersize=3, color=(:navy, 0.3), meshwidth=0.6)
+    lbpanel!(ax2, lbrun, step; markersize = 3, color = (:navy, 0.3), meshwidth = 0.6)
     xlims!(ax2, -4, 4)
     ylims!(ax2, -2.5, 2.5)
     name = "scatter_$(lbrun.suffix)_step$(lpad(step, 5, '0')).png"
@@ -103,22 +106,23 @@ function plot_evolution(lbrun::LBScatterRun)
     nstep = length(uniq_steps)
     ncol = 5
     nrow = cld(nstep, ncol)
-    fig = Figure(; size=(300 * ncol, 300 * nrow))
+    fig = Figure(; size = (300 * ncol, 300 * nrow))
     Label(
         fig[0, 1:ncol],
         "LB particle-scatter evolution  (suffix=$(lbrun.suffix), bulk zoom v₁∈[-4,4] v₂∈[-2.5,2.5])";
-        fontsize=18,
-        tellwidth=false,
+        fontsize = 18,
+        tellwidth = false
     )
     for (i, step) in enumerate(uniq_steps)
         r = cld(i, ncol)
         c = mod1(i, ncol)
         t = data[findfirst(==(step), steps_all), 2]
-        ax = Axis(fig[r, c]; aspect=DataAspect(), title="step=$step  t=$(round(t; digits=3))", titlesize=12)
+        ax = Axis(fig[r, c]; aspect = DataAspect(),
+            title = "step=$step  t=$(round(t; digits=3))", titlesize = 12)
         lbpanel!(ax, lbrun, step)
         xlims!(ax, -4, 4)
         ylims!(ax, -2.5, 2.5)
-        hidedecorations!(ax; label=false)
+        hidedecorations!(ax; label = false)
     end
     rowsize!(fig.layout, 0, Fixed(40))
     save(lbrun.montage_png, fig)

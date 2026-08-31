@@ -31,7 +31,7 @@
 using CUDA
 
 const _SLICES = 16          # α-chunks per γ (bench: see bench_collision_gpu.jl)
-const _TPB    = 128         # threads per block for the pair kernel
+const _TPB = 128         # threads per block for the pair kernel
 
 # 1/sqrt(x) to ~1 ulp without FP64 division or sqrt: f32 special-function-unit
 # seed (~22 bits) + two FP64 Newton steps (→44 → >53 bits), all FMA-rate ops.
@@ -47,13 +47,14 @@ end
 # threads share s and read the same α entry ⇒ hardware broadcast, and their
 # partial writes at (s-1)N+γ coalesce.
 function _landau_partial!(p1, p2, v1, v2, g1, g2, w, N, S,
-                          lo1, hi1, lo2, hi2)
+        lo1, hi1, lo2, hi2)
     tid = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     tid > N * S && return nothing
     γ = (tid - 1) % N + 1
     s = (tid - 1) ÷ N + 1
     @inbounds begin
-        vγ1 = v1[γ]; vγ2 = v2[γ]
+        vγ1 = v1[γ]
+        vγ2 = v2[γ]
         if vγ1 <= lo1 || vγ1 >= hi1 || vγ2 <= lo2 || vγ2 >= hi2
             p1[tid] = 0.0
             p2[tid] = 0.0
@@ -62,10 +63,13 @@ function _landau_partial!(p1, p2, v1, v2, g1, g2, w, N, S,
         chunk = cld(N, S)
         αlo = (s - 1) * chunk + 1
         αhi = min(s * chunk, N)
-        Gγ1 = g1[γ]; Gγ2 = g2[γ]
-        acc1 = 0.0; acc2 = 0.0
+        Gγ1 = g1[γ]
+        Gγ2 = g2[γ]
+        acc1 = 0.0
+        acc2 = 0.0
         for α in αlo:αhi
-            vα1 = v1[α]; vα2 = v2[α]
+            vα1 = v1[α]
+            vα2 = v2[α]
             if vα1 <= lo1 || vα1 >= hi1 || vα2 <= lo2 || vα2 >= hi2
                 continue
             end
@@ -90,7 +94,8 @@ function _reduce_partials!(o1, o2, p1, p2, N, S)
     γ = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     γ > N && return nothing
     @inbounds begin
-        a1 = 0.0; a2 = 0.0
+        a1 = 0.0
+        a2 = 0.0
         for s in 1:S
             a1 += p1[(s - 1) * N + γ]
             a2 += p2[(s - 1) * N + γ]
@@ -104,11 +109,15 @@ end
 # Persistent device + host staging buffers, reallocated only if N changes.
 mutable struct GpuCollisionBuf
     N::Int
-    v1::CuVector{Float64}; v2::CuVector{Float64}
-    g1::CuVector{Float64}; g2::CuVector{Float64}
+    v1::CuVector{Float64}
+    v2::CuVector{Float64}
+    g1::CuVector{Float64}
+    g2::CuVector{Float64}
     w::CuVector{Float64}
-    o1::CuVector{Float64}; o2::CuVector{Float64}
-    p1::CuVector{Float64}; p2::CuVector{Float64}   # N×_SLICES partials
+    o1::CuVector{Float64}
+    o2::CuVector{Float64}
+    p1::CuVector{Float64}
+    p2::CuVector{Float64}   # N×_SLICES partials
     h::Vector{Float64}                              # host staging, length N
 end
 
@@ -146,13 +155,14 @@ end
 # that trade, not because it is recommended. Projection stays FP64.
 
 function _landau_partial32!(p1, p2, v1, v2, g1, g2, w, N, S,
-                            lo1, hi1, lo2, hi2)
+        lo1, hi1, lo2, hi2)
     tid = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     tid > N * S && return nothing
     γ = (tid - 1) % N + 1
     s = (tid - 1) ÷ N + 1
     @inbounds begin
-        vγ1 = v1[γ]; vγ2 = v2[γ]
+        vγ1 = v1[γ]
+        vγ2 = v2[γ]
         if vγ1 <= lo1 || vγ1 >= hi1 || vγ2 <= lo2 || vγ2 >= hi2
             p1[tid] = 0.0f0
             p2[tid] = 0.0f0
@@ -161,10 +171,13 @@ function _landau_partial32!(p1, p2, v1, v2, g1, g2, w, N, S,
         chunk = cld(N, S)
         αlo = (s - 1) * chunk + 1
         αhi = min(s * chunk, N)
-        Gγ1 = g1[γ]; Gγ2 = g2[γ]
-        acc1 = 0.0f0; acc2 = 0.0f0
+        Gγ1 = g1[γ]
+        Gγ2 = g2[γ]
+        acc1 = 0.0f0
+        acc2 = 0.0f0
         for α in αlo:αhi
-            vα1 = v1[α]; vα2 = v2[α]
+            vα1 = v1[α]
+            vα2 = v2[α]
             if vα1 <= lo1 || vα1 >= hi1 || vα2 <= lo2 || vα2 >= hi2
                 continue
             end
@@ -187,11 +200,15 @@ end
 
 mutable struct GpuCollisionBuf32
     N::Int
-    v1::CuVector{Float32}; v2::CuVector{Float32}
-    g1::CuVector{Float32}; g2::CuVector{Float32}
+    v1::CuVector{Float32}
+    v2::CuVector{Float32}
+    g1::CuVector{Float32}
+    g2::CuVector{Float32}
     w::CuVector{Float32}
-    o1::CuVector{Float64}; o2::CuVector{Float64}
-    p1::CuVector{Float32}; p2::CuVector{Float32}
+    o1::CuVector{Float64}
+    o2::CuVector{Float64}
+    p1::CuVector{Float32}
+    p2::CuVector{Float32}
     hf::Vector{Float32}
     h::Vector{Float64}
 end
@@ -221,7 +238,7 @@ function compute_collision_gpu32!(ws::Workspace, dot_v, v_parts, w_parts, G)
     _upload_col!(b.g1, G, 1, b.hf)
     _upload_col!(b.g2, G, 2, b.hf)
     copyto!(b.w, Float32.(w_parts))
-    @cuda threads=_TPB blocks=cld(N * _SLICES, _TPB) _landau_partial32!(
+    @cuda threads=_TPB blocks=cld(N*_SLICES, _TPB) _landau_partial32!(
         b.p1, b.p2, b.v1, b.v2, b.g1, b.g2, b.w, N, _SLICES,
         Float32(ws.bp1[1]), Float32(ws.bp1[end]),
         Float32(ws.bp2[1]), Float32(ws.bp2[end]))
@@ -246,7 +263,7 @@ function compute_collision_gpu!(ws::Workspace, dot_v, v_parts, w_parts, G)
     _upload_col!(b.g1, G, 1, b.h)
     _upload_col!(b.g2, G, 2, b.h)
     copyto!(b.w, w_parts)
-    @cuda threads=_TPB blocks=cld(N * _SLICES, _TPB) _landau_partial!(
+    @cuda threads=_TPB blocks=cld(N*_SLICES, _TPB) _landau_partial!(
         b.p1, b.p2, b.v1, b.v2, b.g1, b.g2, b.w, N, _SLICES,
         ws.bp1[1], ws.bp1[end], ws.bp2[1], ws.bp2[end])
     @cuda threads=256 blocks=cld(N, 256) _reduce_partials!(

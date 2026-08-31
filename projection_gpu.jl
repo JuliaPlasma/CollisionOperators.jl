@@ -18,7 +18,8 @@ using CUDA
 
 # Largest i with bp[i] <= x, assuming bp[1] < x < bp[end].
 @inline function _cell_search(bp, n::Int, x::Float64)
-    i = 1; hi = n
+    i = 1
+    hi = n
     while i + 1 < hi
         mid = (i + hi) >> 1
         if bp[mid] <= x
@@ -44,21 +45,24 @@ end
 end
 
 function _l2_scatter_kernel!(rhs, v1, v2, w, bp1, bp2, C1, C2, bs1, bs2,
-                             n1::Int, n2::Int, nd1::Int, N::Int)
+        n1::Int, n2::Int, nd1::Int, N::Int)
     α = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     α > N && return nothing
     @inbounds begin
-        x = v1[α]; y = v2[α]
+        x = v1[α]
+        y = v2[α]
         (x <= bp1[1] || x >= bp1[n1] || y <= bp2[1] || y >= bp2[n2]) && return nothing
         i = _cell_search(bp1, n1, x)
         j = _cell_search(bp2, n2, y)
-        ξ1 = (x - bp1[i]) / (bp1[i+1] - bp1[i])
-        ξ2 = (y - bp2[j]) / (bp2[j+1] - bp2[j])
+        ξ1 = (x - bp1[i]) / (bp1[i + 1] - bp1[i])
+        ξ2 = (y - bp2[j]) / (bp2[j + 1] - bp2[j])
         φ1 = _extract3(C1, i, _bern2(ξ1))
         φ2 = _extract3(C2, j, _bern2(ξ2))
         wα = w[α]
-        s1 = bs1[i]; s2 = bs2[j]
+        s1 = bs1[i]
+        s2 = bs2[j]
         for j2 in 1:3, j1 in 1:3
+
             gid = (s1 + j1 - 1) + (s2 + j2 - 2) * nd1
             CUDA.@atomic rhs[gid] += wα * φ1[j1] * φ2[j2]
         end
@@ -67,11 +71,12 @@ function _l2_scatter_kernel!(rhs, v1, v2, w, bp1, bp2, C1, C2, bs1, bs2,
 end
 
 function _G_gather_kernel!(G1, G2, v1, v2, L, bp1, bp2, C1, C2, bs1, bs2,
-                           n1::Int, n2::Int, nd1::Int, N::Int)
+        n1::Int, n2::Int, nd1::Int, N::Int)
     α = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     α > N && return nothing
     @inbounds begin
-        x = v1[α]; y = v2[α]
+        x = v1[α]
+        y = v2[α]
         if x <= bp1[1] || x >= bp1[n1] || y <= bp2[1] || y >= bp2[n2]
             G1[α] = 0.0
             G2[α] = 0.0
@@ -79,19 +84,22 @@ function _G_gather_kernel!(G1, G2, v1, v2, L, bp1, bp2, C1, C2, bs1, bs2,
         end
         i = _cell_search(bp1, n1, x)
         j = _cell_search(bp2, n2, y)
-        h1 = bp1[i+1] - bp1[i]
-        h2 = bp2[j+1] - bp2[j]
+        h1 = bp1[i + 1] - bp1[i]
+        h2 = bp2[j + 1] - bp2[j]
         ξ1 = (x - bp1[i]) / h1
         ξ2 = (y - bp2[j]) / h2
-        φ1  = _extract3(C1, i, _bern2(ξ1))
-        φ2  = _extract3(C2, j, _bern2(ξ2))
+        φ1 = _extract3(C1, i, _bern2(ξ1))
+        φ2 = _extract3(C2, j, _bern2(ξ2))
         dφ1 = _extract3(C1, i, _dbern2(ξ1))
         dφ2 = _extract3(C2, j, _dbern2(ξ2))
         inv_h1 = 1.0 / h1
         inv_h2 = 1.0 / h2
-        s1 = bs1[i]; s2 = bs2[j]
-        acc1 = 0.0; acc2 = 0.0
+        s1 = bs1[i]
+        s2 = bs2[j]
+        acc1 = 0.0
+        acc2 = 0.0
         for j2 in 1:3, j1 in 1:3           # same order as the CPU loop
+
             gid = (s1 + j1 - 1) + (s2 + j2 - 2) * nd1
             Lg = L[gid]
             acc1 += Lg * dφ1[j1] * φ2[j2] * inv_h1
@@ -109,12 +117,13 @@ end
 # clamps each component to ±g_max after dividing by max(|f|, fs_floor). Out-of-
 # domain particles → g = 0 (drift reduces to A + B v).
 function _loggrad_gather_kernel!(g1, g2, v1, v2, fc, bp1, bp2, C1, C2, bs1, bs2,
-                                 n1::Int, n2::Int, nd1::Int, N::Int,
-                                 fs_floor::Float64, g_max::Float64)
+        n1::Int, n2::Int, nd1::Int, N::Int,
+        fs_floor::Float64, g_max::Float64)
     α = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     α > N && return nothing
     @inbounds begin
-        x = v1[α]; y = v2[α]
+        x = v1[α]
+        y = v2[α]
         if x <= bp1[1] || x >= bp1[n1] || y <= bp2[1] || y >= bp2[n2]
             g1[α] = 0.0
             g2[α] = 0.0
@@ -122,24 +131,28 @@ function _loggrad_gather_kernel!(g1, g2, v1, v2, fc, bp1, bp2, C1, C2, bs1, bs2,
         end
         i = _cell_search(bp1, n1, x)
         j = _cell_search(bp2, n2, y)
-        h1 = bp1[i+1] - bp1[i]
-        h2 = bp2[j+1] - bp2[j]
+        h1 = bp1[i + 1] - bp1[i]
+        h2 = bp2[j + 1] - bp2[j]
         ξ1 = (x - bp1[i]) / h1
         ξ2 = (y - bp2[j]) / h2
-        φ1  = _extract3(C1, i, _bern2(ξ1))
-        φ2  = _extract3(C2, j, _bern2(ξ2))
+        φ1 = _extract3(C1, i, _bern2(ξ1))
+        φ2 = _extract3(C2, j, _bern2(ξ2))
         dφ1 = _extract3(C1, i, _dbern2(ξ1))
         dφ2 = _extract3(C2, j, _dbern2(ξ2))
         inv_h1 = 1.0 / h1
         inv_h2 = 1.0 / h2
-        s1 = bs1[i]; s2 = bs2[j]
-        f = 0.0; d1 = 0.0; d2 = 0.0
+        s1 = bs1[i]
+        s2 = bs2[j]
+        f = 0.0
+        d1 = 0.0
+        d2 = 0.0
         for j2 in 1:3, j1 in 1:3           # same order as the CPU loop
+
             gid = (s1 + j1 - 1) + (s2 + j2 - 2) * nd1
             c = fc[gid]
-            f  += c * φ1[j1]  * φ2[j2]
-            d1 += c * dφ1[j1] * φ2[j2]  * inv_h1
-            d2 += c * φ1[j1]  * dφ2[j2] * inv_h2
+            f += c * φ1[j1] * φ2[j2]
+            d1 += c * dφ1[j1] * φ2[j2] * inv_h1
+            d2 += c * φ1[j1] * dφ2[j2] * inv_h2
         end
         invf = 1.0 / max(abs(f), fs_floor)
         g1[α] = clamp(d1 * invf, -g_max, g_max)
@@ -151,14 +164,19 @@ end
 mutable struct GpuProjBuf
     N::Int
     n_dofs::Int
-    v1::CuVector{Float64}; v2::CuVector{Float64}
+    v1::CuVector{Float64}
+    v2::CuVector{Float64}
     w::CuVector{Float64}
     rhs::CuVector{Float64}
     L::CuVector{Float64}
-    G1::CuVector{Float64}; G2::CuVector{Float64}
-    bp1::CuVector{Float64}; bp2::CuVector{Float64}
-    C1::CuArray{Float64, 3}; C2::CuArray{Float64, 3}
-    bs1::CuVector{Int32}; bs2::CuVector{Int32}
+    G1::CuVector{Float64}
+    G2::CuVector{Float64}
+    bp1::CuVector{Float64}
+    bp2::CuVector{Float64}
+    C1::CuArray{Float64, 3}
+    C2::CuArray{Float64, 3}
+    bs1::CuVector{Int32}
+    bs2::CuVector{Int32}
     h::Vector{Float64}          # length-N host staging
     hd::Vector{Float64}         # length-n_dofs host staging
 end

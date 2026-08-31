@@ -64,16 +64,16 @@ Base.@kwdef struct SimParameters
 
     # Implicit-solver knobs
     use_anderson::Bool = true
-    damping::Float64   = 0.7
-    m_anderson::Int    = 8
-    tol::Float64       = 1e-12   # relative tol on ‖r‖ / ‖v‖
-    max_iter::Int      = 2000
+    damping::Float64 = 0.7
+    m_anderson::Int = 8
+    tol::Float64 = 1e-12   # relative tol on ‖r‖ / ‖v‖
+    max_iter::Int = 2000
     # Anderson convergence safety net (see `step_anderson!` doc-comment):
-    abs_floor::Float64       = 1e-7   # cap on effective tol — past this, asking
-                                       # for less is pointless (Picard noise floor)
-    stag_window::Int         = 50     # iters between stagnation checks
-    stag_rel_tol::Float64    = 0.01   # < 1% drop in `nrm_best` over window ⇒ exit
-    damp_decay_start::Int    = 200    # iter index after which damping is decayed
+    abs_floor::Float64 = 1e-7   # cap on effective tol — past this, asking
+    # for less is pointless (Picard noise floor)
+    stag_window::Int = 50     # iters between stagnation checks
+    stag_rel_tol::Float64 = 0.01   # < 1% drop in `nrm_best` over window ⇒ exit
+    damp_decay_start::Int = 200    # iter index after which damping is decayed
     damp_decay_factor::Float64 = 0.5  # damping multiplier once decay starts
 
     # Warm start for the implicit solve: :euler = explicit Euler predictor
@@ -117,8 +117,8 @@ function _parse_override_token(tok::AbstractString)
     startswith(tok, "--") || return nothing
     eq = findfirst('=', tok)
     eq === nothing && error("CLI override $tok must use --key=value form")
-    key = Symbol(tok[3:eq-1])
-    val_str = tok[eq+1:end]
+    key = Symbol(tok[3:(eq - 1)])
+    val_str = tok[(eq + 1):end]
     return key, val_str
 end
 
@@ -127,7 +127,7 @@ end
 # rejected at the call site — too clumsy to express on the CLI.
 function _coerce(::Type{T}, s::AbstractString) where {T}
     if T === Bool
-        s in ("true", "1")  && return true
+        s in ("true", "1") && return true
         s in ("false", "0") && return false
         error("Cannot parse $s as Bool")
     elseif T === Symbol
