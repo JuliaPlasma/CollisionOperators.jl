@@ -1,7 +1,10 @@
 name = "CollisionOperators"
 uuid = "b58b20b1-6bfd-430a-a6d6-d2cc3899be11"
-authors = ["Michael Kraus"]
 version = "1.0.0-DEV"
+authors = ["Michael Kraus"]
+
+[workspace]
+projects = ["docs"]
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
@@ -17,10 +20,8 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
+GLMakie = "0.13"
 julia = "1.12"
-
-[workspace]
-projects = ["docs"]
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
