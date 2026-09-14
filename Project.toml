@@ -17,6 +17,13 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
+CairoMakie = "0.15.12"
+DelimitedFiles = "1.9.1"
+FileIO = "1.19.0"
+ForwardDiff = "1"
+GLMakie = "0.13"
+Mantis = "0.6"
+PNGFiles = "0.4.5"
 julia = "1.12"
 
 [workspace]

@@ -18,4 +18,14 @@ released yet — there are no tags, and the repository holds two commits, both f
 
 ### Breaking Changes
 
+### Dependencies
+
+- `[compat]` now bounds every registered dependency instead of only `julia`: CairoMakie 0.15.12,
+  DelimitedFiles 1.9.1, FileIO 1.19.0, ForwardDiff 1, GLMakie 0.13, Mantis 0.6 and PNGFiles 0.4.5.
+  Until now the package carried no bound on any of them, so a resolve could pick a version whose
+  API no longer matches this source. The lower bounds are the versions this code is known to work
+  with.
+- `docs/Project.toml` bounds Documenter at 1.17.0, so the documentation build resolves the same
+  Documenter everywhere.
+
 ## Open Issues
