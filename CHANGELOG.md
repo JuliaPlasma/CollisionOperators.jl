@@ -36,9 +36,6 @@ released yet — there are no tags, and the repository holds two commits, both f
   Documenter everywhere.
 - Stdlib dependencies now have `[compat]` bounds: LinearAlgebra, Random, Serialization, and
   SparseArrays = "1" so Aqua's deps_compat check passes.
-
-### Testing
-
 - Test suite restructured with `SafeTestsets` with GROUPS; test dependencies moved to
   `test/Project.toml`, `[extras]`/`[targets]` removed, and empty template testset deleted.
   `test/quality/aqua.jl` runs Aqua with stale_deps marked @test_broken for issue #22.
