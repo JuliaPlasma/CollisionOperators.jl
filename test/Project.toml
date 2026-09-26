@@ -1,0 +1,13 @@
+[deps]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+CollisionOperators = "b58b20b1-6bfd-430a-a6d6-d2cc3899be11"
+SafeTestsets = "1bc83da4-3b8d-516f-aca4-4fe02f6d838f"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Aqua = "0.8"
+SafeTestsets = "0.1"
+Test = "1"
+
+[sources]
+CollisionOperators = {path = ".."}

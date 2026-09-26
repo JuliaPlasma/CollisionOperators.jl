@@ -1,6 +1,7 @@
-using CollisionOperators
-using Test
+using SafeTestsets
 
-@testset "CollisionOperators.jl" begin
-    # Write your tests here.
+const GROUPS = isempty(ARGS) ? ["core", "slow"] : ARGS
+
+if "core" in GROUPS
+    @safetestset "Aqua" include("quality/aqua.jl")
 end
