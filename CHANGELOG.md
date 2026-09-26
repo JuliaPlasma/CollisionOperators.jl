@@ -39,5 +39,3 @@ released yet — there are no tags, and the repository holds two commits, both f
 - Test suite restructured with `SafeTestsets` with GROUPS; test dependencies moved to
   `test/Project.toml`, `[extras]`/`[targets]` removed, and empty template testset deleted.
   `test/quality/aqua.jl` runs Aqua with stale_deps marked @test_broken for issue #22.
-
-## Open Issues
