@@ -27,8 +27,6 @@ using Serialization
 using LinearAlgebra
 using LinearAlgebra: ldiv!, mul!
 
-include("warmstart_nn.jl")
-
 # Hot-loop implementations, swappable at startup: `--use_gpu=true` loads
 # collision_gpu.jl / projection_gpu.jl (CUDA) and repoints these Refs. Call
 # sites go through invokelatest so the swap survives world-age.
