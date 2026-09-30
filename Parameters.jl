@@ -163,6 +163,20 @@ function parse_overrides(p::SimParameters, args)
 end
 
 """
+    show(io, ::MIME"text/plain", p::SimParameters)
+
+Print `p` in keyword-constructor form, one field per line. The output is valid
+Julia, so `PARAMS = <output>` is itself a preset that reproduces the run.
+"""
+function Base.show(io::IO, ::MIME"text/plain", p::SimParameters)
+    println(io, "SimParameters(")
+    for f in fieldnames(SimParameters)
+        println(io, "    ", f, " = ", repr(getfield(p, f)), ",")
+    end
+    print(io, ")")
+end
+
+"""
     print_summary(p::SimParameters)
 
 One-shot human-readable dump of the active configuration. Used at the top of

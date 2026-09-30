@@ -59,6 +59,22 @@ function rclone_upload(suffix::String, fname::String)
     return nothing
 end
 
+# ---- Run record ---------------------------------------------------------------
+# Write the resolved parameters (preset + CLI overrides) to params_<suffix>.jl
+# and mirror it to S3. The file is a preset itself: `julia main.jl
+# params_<suffix>.jl` reruns with identical parameters.
+function save_params(p::SimParameters)
+    fname = "params_$(p.suffix).jl"
+    open(fname, "w") do io
+        print(io, "PARAMS = ")
+        show(io, MIME("text/plain"), p)
+        println(io)
+    end
+    println("Saved $fname")
+    rclone_upload(p.suffix, fname)
+    return fname
+end
+
 # ---- Checkpoint / resume ----------------------------------------------------
 # Full simulation state serialized via stdlib `Serialization` (no extra deps).
 # Written at every snapshot step (≡ every 25 steps + final). On resume, the
@@ -808,6 +824,7 @@ function main(args = ARGS)
         end
     end
 
+    save_params(p)
     res = run_simulation(p; resume = resume)
     if isempty(res.iter_history)
         println("\n--- No new steps run (already at N_STEPS) ---")
