@@ -60,18 +60,16 @@ function rclone_upload(suffix::String, fname::String)
 end
 
 # ---- Run record ---------------------------------------------------------------
-# Write the resolved parameters (preset + CLI overrides) to params_<suffix>.jl
-# and mirror it to S3. The file is a preset itself: `julia main.jl
-# params_<suffix>.jl` reruns with identical parameters.
-function save_params(p::SimParameters)
-    fname = "params_$(p.suffix).jl"
+# `save(fname, p)` writes the resolved parameters (preset + CLI overrides) as a
+# preset file: `julia main.jl <fname>` reruns with identical parameters. A
+# method of FileIO's `save` (re-exported by CairoMakie), like `save(png, fig)`.
+function CairoMakie.save(fname::AbstractString, p::SimParameters)
     open(fname, "w") do io
         print(io, "PARAMS = ")
         show(io, MIME("text/plain"), p)
         println(io)
     end
     println("Saved $fname")
-    rclone_upload(p.suffix, fname)
     return fname
 end
 
@@ -824,7 +822,9 @@ function main(args = ARGS)
         end
     end
 
-    save_params(p)
+    params_file = "params_$(p.suffix).jl"
+    save(params_file, p)
+    rclone_upload(p.suffix, params_file)
     res = run_simulation(p; resume = resume)
     if isempty(res.iter_history)
         println("\n--- No new steps run (already at N_STEPS) ---")
