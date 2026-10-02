@@ -103,7 +103,19 @@ function save_checkpoint(suffix::String, step::Int, v_particles, w_particles,
                 rng_state))
     end
     println("Saved $fname")
+    rclone_upload(suffix, fname)
     return fname
+end
+
+# Drop rows past `step`, left by a run that got further than the checkpoint
+# being resumed from, so the appended rows don't repeat steps. Column 1 is the
+# step; the header line is kept.
+function truncate_csv_after(fname::String, step::Int)
+    isfile(fname) || return nothing
+    lines = readlines(fname)
+    keep = filter(l -> something(tryparse(Int, first(split(l, ','))), -1) <= step, lines)
+    length(keep) == length(lines) || write(fname, join(keep, '\n') * '\n')
+    return nothing
 end
 
 # `step=:auto` (or any non-positive Int) → pick the highest-step checkpoint
@@ -641,6 +653,8 @@ function run_simulation(p::SimParameters; resume = nothing)
             copy(Random.default_rng()))
     else
         # Resume: keep existing CSV rows ≤ start_step, append from now on.
+        truncate_csv_after(cons_csv, start_step)
+        truncate_csv_after(snap_csv, start_step)
         cons_io = open(cons_csv, "a")
         snap_io = open(snap_csv, "a")
     end
