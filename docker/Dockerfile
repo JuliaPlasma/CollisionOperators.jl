@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # GPU runtime image for Runpod pods: Julia + every dependency of main.jl
 # (including CUDA.jl and its toolkit artifacts) installed and precompiled at
 # build time, so a pod goes from boot to the first time step without Pkg work.
@@ -122,6 +123,7 @@ ENV OPENBLAS_NUM_THREADS=1
 # devtools stage. Root only — sshd and authorized_keys stay with runpod/base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git zsh tmux fzf zoxide direnv bat ripgrep fd-find file less ncurses-term kitty-terminfo \
+      universal-ctags global \
  && ln -sf /usr/bin/batcat /usr/local/bin/bat && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
  && usermod -s /usr/bin/zsh root \
  && rm -rf /var/lib/apt/lists/*
@@ -143,6 +145,22 @@ RUN { echo "export JULIA_DEPOT_PATH='$JULIA_DEPOT_PATH'"; \
       echo 'case ":$PATH:" in *:/opt/julia/bin:*) ;; *) export PATH="/opt/julia/bin:$PATH" ;; esac'; \
     } > /etc/profile.d/julia.sh \
  && echo '[ -r /etc/profile.d/julia.sh ] && emulate sh -c ". /etc/profile.d/julia.sh"' >> /etc/zsh/zshenv
+
+# Runpod's SSH proxy ignores root's login shell: it starts bash with TERM=xterm,
+# no locale and a high-latency tty (nvim's startup terminal queries time out
+# with E1568). Fix those up and switch to zsh. A direct SSH session goes through
+# sshd with the client's TERM and lands in zsh, so it never hits this.
+# /start.sh appends `source /etc/rp_environment` to .bashrc at boot, after this
+# block, so load it here before exec'ing zsh.
+RUN cat >> /root/.bashrc <<'EOF'
+
+# Runpod SSH proxy session → 256-color TERM, UTF-8, nvim without tty queries, zsh
+if [[ $- == *i* && $TERM == xterm ]]; then
+    [ -r /etc/rp_environment ] && . /etc/rp_environment
+    export TERM=xterm-256color COLORTERM=truecolor LANG=C.UTF-8 NVIM_NOTTYFAST=1
+    exec zsh -l
+fi
+EOF
 
 COPY . /root/CollisionOperators.jl
 WORKDIR /root/CollisionOperators.jl
