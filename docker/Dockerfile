@@ -42,7 +42,7 @@ ARG NVIM_BRANCH=main
 ARG NVIM_REV=unset
 RUN echo "nvim-config ${NVIM_BRANCH} @ ${NVIM_REV}" \
  && git clone --depth=1 --branch "${NVIM_BRANCH}" https://github.com/junyixu/nvim-config.git ~/.config/nvim \
- && git -C ~/.config/nvim rev-parse HEAD > ~/.config/nvim-rev \
+ && git -C ~/.config/nvim rev-parse HEAD > ~/.config/nvim-rev
 ARG ZSH_BRANCH=main
 ARG ZSH_REV=unset
 RUN echo "zsh-config ${ZSH_BRANCH} @ ${ZSH_REV}" \
