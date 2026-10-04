@@ -38,7 +38,7 @@ ENV PATH=/opt/nvim/bin:/opt/bin:/root/.local/bin:$PATH
 # Configs come straight from public GitHub repos. The *_REV args are cache
 # busters only: the Docker workflow passes each branch's current commit, so a
 # config push invalidates its layer (and everything after it in this stage).
-ARG NVIM_BRANCH=feat/nvim-full-flag
+ARG NVIM_BRANCH=main
 ARG NVIM_REV=unset
 RUN echo "nvim-config ${NVIM_BRANCH} @ ${NVIM_REV}" \
  && git clone --depth=1 --branch "${NVIM_BRANCH}" https://github.com/junyixu/nvim-config.git ~/.config/nvim \
