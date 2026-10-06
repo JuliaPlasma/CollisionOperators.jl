@@ -90,14 +90,15 @@ function checkpoint_path(suffix::String, step::Int)
     "checkpoint_$(suffix)_step$(lpad(step, 4, '0')).jls"
 end
 
-function save_checkpoint(suffix::String, step::Int, v_particles, w_particles,
+function save_checkpoint(suffix::String, step::Int, t::Float64,
+        v_particles, w_particles,
         f_coeffs, entropy_history, energy_history,
         momentum_history, iter_history, res_history,
         fp_l2_history, neg_history, rng_state)
     fname = checkpoint_path(suffix, step)
     open(fname, "w") do io
         serialize(io,
-            (; step, v_particles, w_particles, f_coeffs,
+            (; step, t, v_particles, w_particles, f_coeffs,
                 entropy_history, energy_history, momentum_history,
                 iter_history, res_history, fp_l2_history, neg_history,
                 rng_state))
@@ -116,6 +117,71 @@ function truncate_csv_after(fname::String, step::Int)
     keep = filter(l -> something(tryparse(Int, first(split(l, ','))), -1) <= step, lines)
     length(keep) == length(lines) || write(fname, join(keep, '\n') * '\n')
     return nothing
+end
+
+# Conservation-CSV columns. `time` is the accumulated physical time and `dt` the
+# step size that produced the row, so `cumsum(dt) == time` holds even when a
+# resume changes DT. Older files stored `time = step * DT`, which silently
+# rescaled the whole history whenever a resume used a different DT.
+const CONS_COLS = ["step", "time", "entropy", "energy", "momentum_1",
+    "momentum_2", "iter", "residual", "fp_minus_fs", "neg_part", "r0", "dt"]
+
+# Bring a conservation CSV written by an older version up to `CONS_COLS`: fill
+# any column it lacks with 0.0, recover each step's DT from the legacy
+# `time = step * DT` and replace `time` with the accumulated physical time.
+# A no-op once `dt` is there, so resuming the same run twice is safe.
+function migrate_cons_csv!(fname::String)
+    isfile(fname) || return nothing
+    lines = readlines(fname)
+    isempty(lines) && return nothing
+    old = String.(split(first(lines), ','))
+    "dt" in old && return nothing
+    rows = [Dict(zip(old, String.(split(l, ','))))
+            for l in Iterators.drop(lines, 1)]
+    # time / step is that row's DT. The last row of a repeated step wins, since
+    # an older resume appended instead of truncating; a step absent from the
+    # file contributes nothing to the sum.
+    dt_at = Dict{Int, Float64}()
+    for r in rows
+        st = tryparse(Int, get(r, "step", ""))
+        t = tryparse(Float64, get(r, "time", ""))
+        (st === nothing || t === nothing || st < 0) && continue
+        dt_at[st] = st == 0 ? 0.0 : t / st
+    end
+    isempty(dt_at) && return nothing
+    t_at, t_acc = Dict{Int, Float64}(), 0.0
+    for st in 0:maximum(keys(dt_at))
+        t_acc += get(dt_at, st, 0.0)
+        t_at[st] = t_acc
+    end
+    tmp = fname * ".migrating"
+    open(tmp, "w") do io
+        println(io, join(CONS_COLS, ','))
+        for r in rows
+            st = tryparse(Int, get(r, "step", ""))
+            (st === nothing || !haskey(t_at, st)) && continue
+            r["time"] = string(t_at[st])
+            r["dt"] = string(dt_at[st])
+            println(io, join((get(r, c, "0.0") for c in CONS_COLS), ','))
+        end
+    end
+    mv(tmp, fname; force = true)
+    println("Migrated $fname to accumulated `time` + `dt` " *
+            "($(length(old)) → $(length(CONS_COLS)) columns)")
+    return nothing
+end
+
+# Accumulated physical time recorded for `step` in a migrated conservation CSV
+# (last row wins if the step repeats); `nothing` if the step is not in the file.
+function cons_time_at(fname::String, step::Int)
+    isfile(fname) || return nothing
+    t = nothing
+    for l in Iterators.drop(readlines(fname), 1)
+        f = split(l, ',')
+        length(f) >= 2 && tryparse(Int, f[1]) == step &&
+            (t = tryparse(Float64, f[2]))
+    end
+    return t
 end
 
 # `step=:auto` (or any non-positive Int) → pick the highest-step checkpoint
@@ -514,7 +580,10 @@ function run_simulation(p::SimParameters; resume = nothing)
     println("Workspace: n_dofs=$(ws.n_dofs)  n_elements=$(ws.n_elements)")
 
     # ---- State init: either fresh sample or resume from checkpoint ----
+    cons_csv = "conservation_history_$(p.suffix).csv"
+    snap_csv = "particle_snapshots_$(p.suffix).csv"
     start_step = 0
+    t_start = 0.0          # physical time at start_step
     local v_particles, w_particles, f_coeffs
     local entropy_history, energy_history, momentum_history
     local iter_history, res_history, fp_l2_history, neg_history
@@ -541,7 +610,18 @@ function run_simulation(p::SimParameters; resume = nothing)
         start_step < p.N_STEPS || error(
             "Checkpoint step=$start_step ≥ N_STEPS=$(p.N_STEPS); nothing to do")
 
-        println("Resuming from step $start_step (running through $(p.N_STEPS))")
+        # The CSV may predate the `dt` column; normalise it before reading
+        # t_start out of it or appending rows in the new layout.
+        migrate_cons_csv!(cons_csv)
+
+        # Physical time across the resume: the checkpoint if it has one, else
+        # the migrated CSV, else assume DT never changed up to here.
+        t_start = hasproperty(ckpt, :t) ? ckpt.t :
+                  something(cons_time_at(cons_csv, start_step),
+                      start_step * p.DT)
+
+        println("Resuming from step $start_step, t=$t_start " *
+                "(running through $(p.N_STEPS) at DT=$(p.DT))")
     else
         v_particles = zeros(p.N_PARTICLES, 2)
         if p.v1_peak != 0.0
@@ -620,21 +700,17 @@ function run_simulation(p::SimParameters; resume = nothing)
     push!(snapshot_steps, p.N_STEPS)
     snapshots_v = Dict{Int, Matrix{Float64}}()
 
-    cons_csv = "conservation_history_$(p.suffix).csv"
-    snap_csv = "particle_snapshots_$(p.suffix).csv"
     if start_step == 0
         snapshots_v[0] = copy(v_particles)
         save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
         plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
         cons_io = open(cons_csv, "w")
-        println(cons_io,
-            "step,time,entropy,energy,momentum_1,momentum_2," *
-            "iter,residual,fp_minus_fs,neg_part,r0")
+        println(cons_io, join(CONS_COLS, ','))
         println(cons_io,
             "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
             "$(momentum_history[1][1]),$(momentum_history[1][2])," *
-            "0,0.0,0.0,0.0,0.0")
+            "0,0.0,0.0,0.0,0.0,0.0")
         flush(cons_io)
         rclone_upload(p.suffix, cons_csv)
 
@@ -647,7 +723,7 @@ function run_simulation(p::SimParameters; resume = nothing)
 
         # Write a step-0 checkpoint so future runs can resume even before any
         # time-stepping completed (cheap and uniform).
-        save_checkpoint(p.suffix, 0, v_particles, w_particles, f_coeffs,
+        save_checkpoint(p.suffix, 0, 0.0, v_particles, w_particles, f_coeffs,
             entropy_history, energy_history, momentum_history,
             iter_history, res_history, fp_l2_history, neg_history,
             copy(Random.default_rng()))
@@ -715,12 +791,16 @@ function run_simulation(p::SimParameters; resume = nothing)
         push!(fp_l2_history, compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles))
         push!(neg_history, compute_negative_part_l1(ws, f_s))
 
+        # Accumulated from t_start, so a resume at a different DT extends the
+        # history instead of rescaling it.
+        t = t_start + (step - start_step) * p.DT
+
         # Append this step's conservation row (crash-safe).
-        let t = step * p.DT, P = momentum_history[end]
+        let P = momentum_history[end]
             println(cons_io,
                 "$step,$t,$(entropy_history[end]),$(energy_history[end])," *
                 "$(P[1]),$(P[2]),$iter,$res_final," *
-                "$(fp_l2_history[end]),$(neg_history[end]),$r0_init")
+                "$(fp_l2_history[end]),$(neg_history[end]),$r0_init,$(p.DT)")
             flush(cons_io)
         end
 
@@ -728,14 +808,16 @@ function run_simulation(p::SimParameters; resume = nothing)
             snapshots_v[step] = copy(v_particles)
             save_fs_snapshot(ws, p.suffix, step, f_coeffs)
             plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
-            let t = step * p.DT
-                for i in axes(v_particles, 1)
-                    println(snap_io,
-                        "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
-                end
-                flush(snap_io)
+            # `time` here is derived from `step`, and these files run to GB, so
+            # a resume does not rewrite them: rows a legacy run already wrote
+            # keep their `step * DT`. Take physical time from the conservation
+            # CSV, which the resume does migrate.
+            for i in axes(v_particles, 1)
+                println(snap_io,
+                    "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
             end
-            save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs,
+            flush(snap_io)
+            save_checkpoint(p.suffix, step, t, v_particles, w_particles, f_coeffs,
                 entropy_history, energy_history, momentum_history,
                 iter_history, res_history, fp_l2_history, neg_history,
                 copy(Random.default_rng()))
