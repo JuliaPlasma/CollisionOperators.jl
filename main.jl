@@ -327,6 +327,7 @@ function step_anderson!(ws::Workspace,
     vold_v = vec(v_old)
 
     history = 0
+    slot = 0               # ring cursor into the ΔF/ΔG columns
     nrm_r0 = 0.0
     nrm_r = 0.0
     nrm_best = Inf
@@ -375,6 +376,7 @@ function step_anderson!(ws::Workspace,
         just_restarted = false
         if k > 1 && nrm_r > restart_factor * nrm_best
             history = 0
+            slot = 0
             n_restart += 1
             just_restarted = true
         end
@@ -388,16 +390,15 @@ function step_anderson!(ws::Workspace,
         if k == 1 || just_restarted || !use_anderson
             @. v1_v = damping_eff * Gv_v + (1 - damping_eff) * vold_v
         else
-            if history < m
-                history += 1
-                new_col = history
-            else
-                @views ΔF[:, 1:(m - 1)] .= ΔF[:, 2:m]
-                @views ΔG[:, 1:(m - 1)] .= ΔG[:, 2:m]
-                new_col = m
-            end
-            @views ΔF[:, new_col] .= r_v .- rp_v
-            @views ΔG[:, new_col] .= Gv_v .- Gp_v
+            # The least-squares problem is invariant under a common column
+            # permutation of ΔF and ΔG, so the newest difference just
+            # overwrites the oldest column: a ring cursor instead of shifting
+            # the whole window left by one, which recopied 2·N·(m-1) entries
+            # on every iteration once the window was full.
+            slot = mod1(slot + 1, m)
+            history = min(history + 1, m)
+            @views ΔF[:, slot] .= r_v .- rp_v
+            @views ΔG[:, slot] .= Gv_v .- Gp_v
 
             ΔFv = @view ΔF[:, 1:history]
             ΔGv = @view ΔG[:, 1:history]
