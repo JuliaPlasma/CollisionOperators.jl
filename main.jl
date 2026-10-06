@@ -933,4 +933,9 @@ function main(args = ARGS)
     end
 end
 
-main()
+# Run only when executed as a script (`julia main.jl ...`), so the test suite and
+# the REPL can `include` this file to reach the functions above without starting
+# a simulation.
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
