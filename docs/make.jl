@@ -16,7 +16,8 @@ makedocs(;
         "Home" => "index.md",
         "Operators" => [
             "Lenard–Bernstein (2D)" => "lenard_bernstein.md"
-        ]
+        ],
+        "Anderson window update" => "anderson_window.md"
     ]
 )
 
