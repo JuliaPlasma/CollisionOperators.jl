@@ -83,7 +83,10 @@ Alongside `collision_model`, two more `SimParameters` fields (preset or
 
 | File | Role |
 |------|------|
-| `main.jl` | Unified driver: time loop, discrete-gradient / LB Picard map, implicit solve (Picard / Anderson), checkpoint/resume, CSV + PNG output; picks operator & backend from `SimParameters` |
+| `main.jl` | Unified driver: CLI + preset loading, backend selection, time loop, per-step diagnostics; picks operator & backend from `SimParameters` |
+| `solver.jl` | The implicit step: discrete-gradient / LB Picard map and the Anderson-accelerated fixed-point solve, plus the swappable CPU/GPU hot-loop hooks |
+| `io.jl` | Run record: rclone mirror to S3, resolved-parameter preset, checkpoint/resume, conservation-history CSV (and migration of pre-`dt` files) |
+| `plots.jl` | Per-run output artifacts: `fs_snapshot` coefficient CSV and the f_s / dashboard PNGs (CairoMakie) |
 | `functions.jl` | Both operators' physics: L² projection, entropy & entropy-gradient seed, particle log-gradient, Landau collision velocity, LB moments / drift multipliers / velocity update, diagnostics |
 | `collision_gpu.jl` | CUDA O(N²) Landau kernels (Float64, plus a Float32 experiment) |
 | `projection_gpu.jl` | CUDA `P_DEG=2` particle↔spline kernels shared by both operators: L² scatter, ∇L gather, log-gradient gather |

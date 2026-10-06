@@ -288,3 +288,18 @@ function compute_fs_minus_fp_l2(ws::Workspace, field::Forms.FormField,
     end
     return sqrt(sumsq)
 end
+
+# (3) Conserved particle moments: total momentum P = Σ w_α v_α and kinetic
+#     energy E = ½ Σ w_α |v_α|². Both are exactly conserved by the Landau sum
+#     and by the LB drift multipliers, so their drift measures solver error
+#     rather than physics. Mesh-independent — no `Workspace` needed.
+function compute_momentum(v_parts, w_parts)
+    p1 = sum(w_parts[α] * v_parts[α, 1] for α in axes(v_parts, 1))
+    p2 = sum(w_parts[α] * v_parts[α, 2] for α in axes(v_parts, 1))
+    return (p1, p2)
+end
+
+function compute_energy(v_parts, w_parts)
+    return 0.5 * sum(w_parts[α] * (v_parts[α, 1]^2 + v_parts[α, 2]^2)
+    for α in axes(v_parts, 1))
+end

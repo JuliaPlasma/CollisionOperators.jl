@@ -7,7 +7,7 @@ mass, which makes the operator nonlinear through its dependence on the moments
 of the distribution. This page documents the structure-preserving *particle* discretisation
 that lives at the
 [repository root](https://github.com/JuliaPlasma/CollisionOperators.jl)
-(`main.jl`, `functions.jl`, `MantisWrappers.jl`, `Parameters.jl`,
+(`main.jl`, `solver.jl`, `functions.jl`, `MantisWrappers.jl`, `Parameters.jl`,
 `parameters_LB*.jl`). The construction follows Jeyakumar et al. (2024), written
 here in 2D velocity space.
 

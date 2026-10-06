@@ -1,6 +1,6 @@
 # The Anderson window update
 
-The Anderson acceleration in [`step_anderson!`](https://github.com/junyixu/CollisionOperators.jl/blob/main/main.jl)
+The Anderson acceleration in [`step_anderson!`](https://github.com/junyixu/CollisionOperators.jl/blob/main/solver.jl)
 keeps the last ``m`` residual and map differences in two dense buffers, ``\Delta F``
 and ``\Delta G``, each of size ``2N \times m``. Every iteration contributes one new
 column and must drop the oldest.
