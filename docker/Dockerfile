@@ -122,7 +122,7 @@ ENV OPENBLAS_NUM_THREADS=1
 # devtools stage. Root only — sshd and authorized_keys stay with runpod/base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git zsh tmux fzf zoxide direnv bat ripgrep fd-find file less ncurses-term kitty-terminfo \
-      universal-ctags global \
+      universal-ctags global htop \
  && ln -sf /usr/bin/batcat /usr/local/bin/bat && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
  && usermod -s /usr/bin/zsh root \
  && rm -rf /var/lib/apt/lists/*
