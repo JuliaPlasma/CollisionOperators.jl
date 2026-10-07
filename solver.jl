@@ -8,15 +8,52 @@
 
 using LinearAlgebra: norm, mul!, ldiv!
 
-# Hot-loop implementations, swappable at startup: `--use_gpu=true` loads
-# collision_gpu.jl / projection_gpu.jl (CUDA) and repoints these Refs. Call
-# sites go through invokelatest so the swap survives world-age.
+"""
+    COLLISION_FN, L2PROJ_FN, COMPG_FN, LOGGRAD_FN
+
+Swappable implementations of the four hot-loop kernels, held in `Ref`s so the
+backend can be chosen at startup rather than through the type system.
+
+They default to the CPU routines from `functions.jl`. Passing `--use_gpu=true`
+makes `main` load `collision_gpu.jl` and `projection_gpu.jl` and repoint these at
+the CUDA kernels: the ``O(N^2)`` Landau pair sum (`COLLISION_FN`, FP64 or FP32),
+the particle-to-spline L2 projection (`L2PROJ_FN`), the spline gradient gather
+(`COMPG_FN`) and, for Lenard–Bernstein, the direct log-density gradient
+(`LOGGRAD_FN`).
+
+Every call site goes through `Base.invokelatest` so the swap is visible to code
+that was already compiled, which a plain call would miss under world-age.
+"""
 const COLLISION_FN = Ref{Any}(compute_collision!)
 const L2PROJ_FN = Ref{Any}(l2_project!)
 const COMPG_FN = Ref{Any}(compute_G!)
 const LOGGRAD_FN = Ref{Any}(eval_loggrad_at_particles!)   # LB base gradient
 
-# Compute ∂S_h/∂v_α = -w_α G_α for every particle. Workspace-aware.
+# A docstring before `const` attaches to that binding alone, so alias the shared
+# one onto the other three; otherwise `@ref` to them has nothing to resolve.
+@doc (@doc COLLISION_FN) L2PROJ_FN
+@doc (@doc COLLISION_FN) COMPG_FN
+@doc (@doc COLLISION_FN) LOGGRAD_FN
+
+@doc raw"""
+    compute_entropy_gradient!(ws, dS, v_parts, w_parts, f_coeffs_buf, r_vec, L_vec, G_buf)
+
+Entropy gradient with respect to every particle velocity,
+
+```math
+\frac{\partial S_h}{\partial v_\alpha} = -w_\alpha G_\alpha ,
+```
+
+where ``G_\alpha = \nabla (M^{-1} r)(v_\alpha)`` is the finite-element projection of
+``\nabla \log f_s`` evaluated at particle ``\alpha`` and ``w_\alpha`` is its weight.
+
+The projection chain is ``v \mapsto f_s`` (L2 projection), ``f_s \mapsto r``, then
+``r \mapsto M^{-1} r`` through the cached mass-matrix factorisation `ws.M_lu`. Both
+the projection and the gradient evaluation go through [`L2PROJ_FN`](@ref) and
+[`COMPG_FN`](@ref), so this routine runs on the GPU when those are repointed.
+
+Writes `dS` in place; `f_coeffs_buf`, `r_vec`, `L_vec` and `G_buf` are scratch.
+"""
 function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
         f_coeffs_buf, r_vec, L_vec, G_buf)
     Base.invokelatest(L2PROJ_FN[], ws, f_coeffs_buf, v_parts, w_parts)
@@ -31,10 +68,67 @@ function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
     return nothing
 end
 
-# One Picard map: v_out = v0 + dt · G̃(v_mid) · ∇̄S
-# `use_gonzalez=false` drops the discrete-gradient correction term, leaving the
-# plain implicit-midpoint rule ∇̄S = ∇S(v_mid). This avoids the Gonzalez |Δv|²
-# denominator that blows up when started at (or near) equilibrium (Δv → 0).
+@doc raw"""
+    picard_map!(ws, v_out, v_in, v0, w_parts, S0, dt, v_mid, dv, dS_mid, G_eff,
+                dot_v_buf, f_buf, r_vec, L_vec, G_buf; use_gonzalez = true)
+
+One Picard map of the implicit step. Given a trial end-of-step state ``v_\text{in}``
+it returns the next iterate
+
+```math
+v_\text{out} = v_0 + \Delta t \, \dot{v}(v_\text{mid}, \overline{\nabla} S) ,
+\qquad
+v_\text{mid} = \tfrac{1}{2}\,(v_0 + v_\text{in}) ,
+\qquad
+\Delta v = v_\text{in} - v_0 ,
+```
+
+so a fixed point ``v_\text{out} = v_\text{in}`` is a solution of the implicit step.
+[`step_anderson!`](@ref) is what drives it to that fixed point.
+
+# Discrete gradient
+
+With `use_gonzalez = true` the entropy gradient carries the Gonzalez correction
+
+```math
+\overline{\nabla} S = \nabla S(v_\text{mid}) + \lambda \, \Delta v ,
+\qquad
+\lambda = \frac{S(v_\text{in}) - S_0 - \Delta v \cdot \nabla S(v_\text{mid})}
+               {\lVert \Delta v \rVert^2} ,
+```
+
+with ``S_0 = S(v_0)`` passed in as `S0`. The rank-one term is chosen so that the
+discrete chain rule
+
+```math
+\overline{\nabla} S \cdot \Delta v = S(v_\text{in}) - S_0
+```
+
+holds *exactly* rather than to within truncation error, which is what makes the
+scheme's entropy production discrete-exact.
+
+`use_gonzalez = false` drops ``\lambda`` and leaves the plain implicit-midpoint rule
+``\overline{\nabla} S = \nabla S(v_\text{mid})``. That removes the
+``\lVert \Delta v \rVert^2`` denominator, which is ill-conditioned when the run starts
+at or near equilibrium (``\Delta v \to 0``); in both branches the denominator is
+guarded by a ``10^{-30}`` floor.
+
+# Collision model
+
+`ws.p.collision_model` selects how ``\dot{v}`` is assembled from ``\overline{\nabla} S``:
+
+- `:landau` — the ``O(N^2)`` pair sum through [`COLLISION_FN`](@ref), on a
+  finite-element entropy gradient.
+- `:lb` — the ``O(N)`` Lenard–Bernstein drift, built from `compute_moments` and
+  `compute_drift_multipliers` so momentum and energy are conserved exactly. LB
+  uses the direct clamped ``\nabla f_s / f_s`` as its base gradient in both modes:
+  the FEM-projected seed injects Gibbs ringing into low-density cells, which
+  Landau's ``f``-weighted mobility suppresses and LB's does not. The
+  discrete-gradient identity holds for *any* base gradient, so Gonzalez only adds
+  the rank-one ``\lambda`` term on top.
+
+Writes `v_out` in place; every other array argument is scratch.
+"""
 function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
         v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
         r_vec, L_vec, G_buf; use_gonzalez::Bool = true)
@@ -107,21 +201,59 @@ function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
     return nothing
 end
 
-# Anderson-accelerated fixed-point iteration. `use_anderson=false` falls back
-# to plain damped Picard.
-#
-# Convergence rules (any one triggers a successful exit; returned `v1` is the
-# best Gv seen across all iterations):
-#   1. Relative+floor:   ‖r‖ < max(tol * ‖v‖, abs_floor)
-#      `abs_floor` caps how tight we ask for — past the numerical noise floor
-#      of the Picard map, asking for less is pointless and burns wall time.
-#   2. Stagnation:       every `stag_window` iter, compare `nrm_best` against
-#      its value `stag_window` iters ago; relative drop < `stag_rel_tol` ⇒ exit.
-#      Catches the late-step plateau where Anderson can't push below 1e-7.
-#
-# Adaptive damping: once past `damp_decay_start` iterations without exit,
-# multiply damping by `damp_decay_factor` (more conservative step) to stabilize
-# stiff late-time fixed-point maps.
+@doc raw"""
+    step_anderson!(ws, v1, v0, w_parts, S0, dt, ...; m = 5, max_iter = 1000,
+                   tol = 1e-12, abs_floor = 1e-7, damping = 0.5, ...)
+        -> (iterations, residual, n_restarts, initial_residual)
+
+Drive [`picard_map!`](@ref) to its fixed point with Anderson acceleration. `v1`
+enters as the initial guess and leaves holding the solution. With
+`use_anderson = false` this degrades to plain damped Picard.
+
+# Anderson acceleration
+
+Writing the Picard map as ``G`` and the residual as ``r_k = G(v_k) - v_k``, the last
+``m`` differences are kept in ``\Delta F`` and ``\Delta G``. Each iteration solves the
+small least-squares problem
+
+```math
+\gamma = \arg\min_\gamma \lVert r_k - \Delta F \gamma \rVert_2^2 ,
+\qquad
+v_{k+1} = (1 - \beta)\, v_k + \beta \left( G(v_k) - \Delta G \gamma \right) ,
+```
+
+with `damping` ``\beta`` blending the accelerated step back toward the raw Picard
+update. The normal equations are regularised with
+``\lambda^2 = \texttt{reg\_factor} \cdot \operatorname{mean}(\operatorname{diag}(\Delta F^\top \Delta F))``
+so the ``m \times m`` system stays solvable when ``\Delta F`` is near rank-deficient.
+
+The window is a ring buffer: the newest difference overwrites the oldest column
+rather than shifting the whole window left, which is valid because the
+least-squares problem is invariant under a common column permutation of
+``\Delta F`` and ``\Delta G``. See [The Anderson window update](@ref) for the measured cost.
+
+# Exit conditions
+
+Any one of these ends the solve successfully; `v1` is set to the best ``G(v)`` seen
+across all iterations, not merely the last one.
+
+1. **Residual.** ``\lVert r \rVert < \max(\texttt{tol} \cdot \lVert v \rVert, \texttt{abs\_floor})``.
+   `abs_floor` caps how tight the solve is asked to be: below the numerical noise
+   floor of the Picard map the extra iterations buy nothing. In FP32 the floor
+   matters a great deal: `abs_floor = 1e-8` cuts the iteration count by over 3x
+   against the `1e-10` the presets carry, at no cost in accuracy.
+2. **Stagnation.** Every `stag_window` iterations the best residual is compared
+   with its value one window earlier; a relative drop below `stag_rel_tol` exits.
+   This catches the late-step plateau where Anderson cannot push further. An
+   iteration count that is an exact multiple of `stag_window` is the signature of
+   a step that left by this route rather than by converging.
+3. **Iteration cap.** `max_iter`, which warns.
+
+Past `damp_decay_start` iterations without an exit, `damping` is multiplied by
+`damp_decay_factor` for a more conservative step, which stabilises stiff
+late-time maps. If `restart_factor` is finite, the window is cleared whenever the
+residual exceeds that multiple of the best residual so far.
+"""
 function step_anderson!(ws::Workspace,
         v1, v0, w_parts, S0, dt,
         v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
