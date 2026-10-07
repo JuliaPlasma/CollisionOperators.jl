@@ -1,18 +1,9 @@
 using CollisionOperators
 using Documenter
 
-# The driver is a set of top-level scripts, not part of the package module, so
-# `main.jl` would put its docstrings in `Main` where Documenter cannot reach
-# them. Load the documented files into a module of their own and point
-# `makedocs` at that as well. `plots.jl` is left out: it only wraps CairoMakie.
-module Driver
-include(joinpath(@__DIR__, "..", "MantisWrappers.jl"))
-using .MantisWrappers
-include(joinpath(@__DIR__, "..", "io.jl"))
-include(joinpath(@__DIR__, "..", "solver.jl"))
-end
-
-DocMeta.setdocmeta!(CollisionOperators, :DocTestSetup, :(using CollisionOperators); recursive = true)
+# Defines the `Driver` module and the doctest setup. Kept in its own file because
+# the Doctests CI job includes it too, without running this script.
+include(joinpath(@__DIR__, "doctestsetup.jl"))
 
 makedocs(;
     modules = [CollisionOperators, Driver],
