@@ -13,7 +13,7 @@
 # ARGS[2:]  : zero or more `--key=value` overrides applied on top of PARAMS
 #
 # Diagnostics pushed to CSV every step:
-#   iter        : Picard iterations used
+#   iter        : Picard-map evaluations used (Anderson or Newton–Krylov)
 #   residual    : ‖G(v) − v‖₂ at the converged iterate
 #   fp_minus_fs : ‖f_s − f_p‖₂  (histogram-based projection-error norm)
 #   neg_part    : ∫ max(−f_s, 0) dv  (Gibbs negative-part L¹)
@@ -21,463 +21,14 @@
 include("MantisWrappers.jl")
 using .MantisWrappers
 
-using CairoMakie
 using Random
-using Serialization
-using LinearAlgebra
-using LinearAlgebra: ldiv!, mul!
+using LinearAlgebra: ldiv!
 
-include("warmstart_nn.jl")
-
-# Hot-loop implementations, swappable at startup: `--use_gpu=true` loads
-# collision_gpu.jl / projection_gpu.jl (CUDA) and repoints these Refs. Call
-# sites go through invokelatest so the swap survives world-age.
-const COLLISION_FN = Ref{Any}(compute_collision!)
-const L2PROJ_FN = Ref{Any}(l2_project!)
-const COMPG_FN = Ref{Any}(compute_G!)
-const LOGGRAD_FN = Ref{Any}(eval_loggrad_at_particles!)   # LB base gradient
-
-# ---- rclone live upload -----------------------------------------------------
-# Mirror conservation CSV + fs snapshots to S3 as they are written, so a remote
-# machine can plot mid-run. Best-effort: failures warn, never abort the sim.
-#   RCLONE_UPLOAD=0  → disable entirely (default on)
-#   RCLONE_REMOTE=…  → override bucket dir (default: suffix with '_'→'-', i.e.
-#                      suffix `bimodal_v1` → mpcdf-s3://…/bimodal-v1)
-rclone_enabled() = get(ENV, "RCLONE_UPLOAD", "1") != "0"
-
-function rclone_remote(suffix::String)
-    get(ENV, "RCLONE_REMOTE",
-        "mpcdf-s3://collision-operators/" * replace(suffix, '_' => '-'))
-end
-
-function rclone_upload(suffix::String, fname::String)
-    rclone_enabled() || return nothing
-    remote = rclone_remote(suffix)
-    try
-        run(`rclone copyto $fname $remote/$fname`)
-    catch e
-        @warn "rclone upload failed" fname remote exception=e
-    end
-    return nothing
-end
-
-# ---- Checkpoint / resume ----------------------------------------------------
-# Full simulation state serialized via stdlib `Serialization` (no extra deps).
-# Written at every snapshot step (≡ every 25 steps + final). On resume, the
-# main loop reloads state and appends to the existing CSVs.
-#
-# State captured:
-#   step          : last completed step (resume continues at step+1)
-#   v_particles   : N×2 velocity matrix
-#   w_particles   : N weights (constant 1/N, saved for sanity)
-#   f_coeffs      : spline coefficient vector (size = ws.n_dofs)
-#   *_history     : seven diagnostic vectors (length = step+1 or step)
-#   rng_state     : copy of Random.default_rng() so any post-resume sampling
-#                   (none currently — kept for forward compat) is reproducible
-function checkpoint_path(suffix::String, step::Int)
-    "checkpoint_$(suffix)_step$(lpad(step, 4, '0')).jls"
-end
-
-function save_checkpoint(suffix::String, step::Int, v_particles, w_particles,
-        f_coeffs, entropy_history, energy_history,
-        momentum_history, iter_history, res_history,
-        fp_l2_history, neg_history, rng_state)
-    fname = checkpoint_path(suffix, step)
-    open(fname, "w") do io
-        serialize(io,
-            (; step, v_particles, w_particles, f_coeffs,
-                entropy_history, energy_history, momentum_history,
-                iter_history, res_history, fp_l2_history, neg_history,
-                rng_state))
-    end
-    println("Saved $fname")
-    return fname
-end
-
-# `step=:auto` (or any non-positive Int) → pick the highest-step checkpoint
-# matching the suffix from the cwd.
-function load_checkpoint(suffix::String, step)
-    fname = if step === :auto || (step isa Integer && step <= 0)
-        files = filter(readdir()) do f
-            startswith(f, "checkpoint_$(suffix)_step") && endswith(f, ".jls")
-        end
-        isempty(files) && error("No checkpoint files for suffix=$suffix")
-        sort(files)[end]
-    else
-        checkpoint_path(suffix, Int(step))
-    end
-    isfile(fname) || error("Checkpoint not found: $fname")
-    println("Loading checkpoint: $fname")
-    return open(deserialize, fname)
-end
-
-# Compute ∂S_h/∂v_α = -w_α G_α for every particle. Workspace-aware.
-function compute_entropy_gradient!(ws::Workspace, dS, v_parts, w_parts,
-        f_coeffs_buf, r_vec, L_vec, G_buf)
-    Base.invokelatest(L2PROJ_FN[], ws, f_coeffs_buf, v_parts, w_parts)
-    f_s = build_field(ws, f_coeffs_buf)
-    compute_r!(ws, r_vec, f_s)
-    ldiv!(L_vec, ws.M_lu, r_vec)
-    Base.invokelatest(COMPG_FN[], ws, G_buf, v_parts, L_vec)
-    @inbounds for α in axes(v_parts, 1)
-        dS[α, 1] = -w_parts[α] * G_buf[α, 1]
-        dS[α, 2] = -w_parts[α] * G_buf[α, 2]
-    end
-    return nothing
-end
-
-# One Picard map: v_out = v0 + dt · G̃(v_mid) · ∇̄S
-# `use_gonzalez=false` drops the discrete-gradient correction term, leaving the
-# plain implicit-midpoint rule ∇̄S = ∇S(v_mid). This avoids the Gonzalez |Δv|²
-# denominator that blows up when started at (or near) equilibrium (Δv → 0).
-function picard_map!(ws::Workspace, v_out, v_in, v0, w_parts, S0, dt,
-        v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
-        r_vec, L_vec, G_buf; use_gonzalez::Bool = true)
-    N = size(v0, 1)
-    is_lb = ws.p.collision_model == :lb
-    @. v_mid = 0.5 * (v0 + v_in)
-    @. dv = v_in - v0
-
-    # --- log-density gradient g (≡ G_eff) at v_mid -----------------------------
-    if is_lb
-        # LB uses the direct clamped ∇f_s/f_s as base gradient in BOTH modes.
-        # The FEM-projected ∇(M⁻¹r) seed used by Landau injects Gibbs ringing
-        # into the LB drift in low-density cells — Landau's f-weighted mobility
-        # suppresses those regions, LB's does not, feeding a runaway negativity
-        # loop (see notes_LB_gonzalez_port.md §3). The discrete-gradient entropy
-        # identity is exact for ANY base gradient, so Gonzalez adds only the
-        # rank-1 λ correction on top of the well-behaved direct gradient.
-        Base.invokelatest(L2PROJ_FN[], ws, f_buf, v_mid, w_parts)
-        Base.invokelatest(LOGGRAD_FN[], ws, G_eff, v_mid, f_buf)
-        if use_gonzalez
-            Base.invokelatest(L2PROJ_FN[], ws, f_buf, v_in, w_parts)
-            S1 = compute_entropy(ws, build_field(ws, f_buf))
-            dot_dv_dS = 0.0
-            nrm2_dv = 0.0
-            @inbounds for α in 1:N   # ∂S/∂v_α = -w_α g_α
-                dot_dv_dS -= w_parts[α] * (dv[α, 1] * G_eff[α, 1] + dv[α, 2] * G_eff[α, 2])
-                nrm2_dv += dv[α, 1]^2 + dv[α, 2]^2
-            end
-            λ = nrm2_dv > 1e-30 ? (S1 - S0 - dot_dv_dS) / nrm2_dv : 0.0
-            @inbounds for α in 1:N
-                inv_w = 1.0 / w_parts[α]
-                G_eff[α, 1] -= λ * dv[α, 1] * inv_w
-                G_eff[α, 2] -= λ * dv[α, 2] * inv_w
-            end
-        end
-    else
-        # Landau: FEM-projected entropy gradient + Gonzalez discrete-grad correction.
-        compute_entropy_gradient!(ws, dS_mid, v_mid, w_parts,
-            f_buf, r_vec, L_vec, G_buf)
-        correction = 0.0
-        if use_gonzalez
-            Base.invokelatest(L2PROJ_FN[], ws, f_buf, v_in, w_parts)
-            S1 = compute_entropy(ws, build_field(ws, f_buf))
-
-            dot_dv_dS = 0.0
-            nrm2_dv = 0.0
-            @inbounds for α in 1:N
-                dot_dv_dS += dv[α, 1] * dS_mid[α, 1] + dv[α, 2] * dS_mid[α, 2]
-                nrm2_dv += dv[α, 1]^2 + dv[α, 2]^2
-            end
-            correction = nrm2_dv > 1e-30 ? (S1 - S0 - dot_dv_dS) / nrm2_dv : 0.0
-        end
-
-        @inbounds for α in 1:N
-            inv_w = 1.0 / w_parts[α]
-            G_eff[α, 1] = -(dS_mid[α, 1] + correction * dv[α, 1]) * inv_w
-            G_eff[α, 2] = -(dS_mid[α, 2] + correction * dv[α, 2]) * inv_w
-        end
-    end
-
-    # --- RHS assembly ----------------------------------------------------------
-    if is_lb
-        n, U1, U2, Q = compute_moments(v_mid, w_parts)
-        A1, A2, B = compute_drift_multipliers(v_mid, w_parts, G_eff, n, U1, U2, Q)
-        compute_LB_velocity!(dot_v_buf, v_mid, G_eff, A1, A2, B, ws.p.nu)
-    else
-        Base.invokelatest(COLLISION_FN[], ws, dot_v_buf, v_mid, w_parts, G_eff)
-    end
-    @. v_out = v0 + dt * dot_v_buf
-    return nothing
-end
-
-# Anderson-accelerated fixed-point iteration. `use_anderson=false` falls back
-# to plain damped Picard.
-#
-# Convergence rules (any one triggers a successful exit; returned `v1` is the
-# best Gv seen across all iterations):
-#   1. Relative+floor:   ‖r‖ < max(tol * ‖v‖, abs_floor)
-#      `abs_floor` caps how tight we ask for — past the numerical noise floor
-#      of the Picard map, asking for less is pointless and burns wall time.
-#   2. Stagnation:       every `stag_window` iter, compare `nrm_best` against
-#      its value `stag_window` iters ago; relative drop < `stag_rel_tol` ⇒ exit.
-#      Catches the late-step plateau where Anderson can't push below 1e-7.
-#
-# Adaptive damping: once past `damp_decay_start` iterations without exit,
-# multiply damping by `damp_decay_factor` (more conservative step) to stabilize
-# stiff late-time fixed-point maps.
-function step_anderson!(ws::Workspace,
-        v1, v0, w_parts, S0, dt,
-        v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
-        r_vec, L_vec, G_buf,
-        Gv, r_curr, r_prev, Gv_prev, v_old, ΔF, ΔG;
-        m = 5, max_iter = 1000, tol = 1e-12,
-        abs_floor = 1e-7,
-        stag_window = 50, stag_rel_tol = 0.01,
-        damp_decay_start = 200, damp_decay_factor = 0.5,
-        restart_factor = Inf, damping = 0.5,
-        reg_factor = 1e-10, verbose = false,
-        use_anderson::Bool = true, use_gonzalez::Bool = true)
-    v1_v = vec(v1)
-    Gv_v = vec(Gv)
-    r_v = vec(r_curr)
-    rp_v = vec(r_prev)
-    Gp_v = vec(Gv_prev)
-    vold_v = vec(v_old)
-
-    history = 0
-    nrm_r0 = 0.0
-    nrm_r = 0.0
-    nrm_best = Inf
-    n_restart = 0
-
-    # Track best iterate so stagnation / max_iter exits return the best Gv
-    # rather than the latest (which may be worse on a non-monotone trajectory).
-    Gv_best = copy(Gv)
-    nrm_best_window = Inf  # nrm_best snapshot from `stag_window` iters ago
-
-    for k in 1:max_iter
-        vold_v .= v1_v
-        picard_map!(ws, Gv, v1, v0, w_parts, S0, dt,
-            v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
-            r_vec, L_vec, G_buf; use_gonzalez = use_gonzalez)
-        @. r_v = Gv_v - v1_v
-        nrm_r = norm(r_v)
-        k == 1 && (nrm_r0 = nrm_r)
-
-        if nrm_r < nrm_best
-            nrm_best = nrm_r
-            Gv_best .= Gv
-        end
-
-        # Convergence: relative tol but never tighter than the absolute floor.
-        eff_tol = max(tol * (norm(v1_v) + 1e-30), abs_floor)
-        if nrm_r < eff_tol
-            v1 .= Gv
-            verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history  [converged]")
-            return k, nrm_r, n_restart, nrm_r0
-        end
-
-        # Stagnation early-exit: insufficient progress over a window of iters.
-        if k > stag_window && k % stag_window == 0
-            rel_improve = (nrm_best_window - nrm_best) /
-                          (nrm_best_window + 1e-30)
-            if rel_improve < stag_rel_tol
-                v1 .= Gv_best
-                verbose && println("    k=$k  stagnated  nrm_best=$nrm_best  " *
-                        "Δ_rel=$rel_improve")
-                return k, nrm_best, n_restart, nrm_r0
-            end
-            nrm_best_window = nrm_best
-        end
-
-        just_restarted = false
-        if k > 1 && nrm_r > restart_factor * nrm_best
-            history = 0
-            n_restart += 1
-            just_restarted = true
-        end
-
-        verbose && println("    k=$k  ‖r‖=$nrm_r  history=$history" *
-                (just_restarted ? "  [restart]" : ""))
-
-        # Adaptive damping kicks in once the fast phase has clearly missed.
-        damping_eff = k > damp_decay_start ? damping * damp_decay_factor : damping
-
-        if k == 1 || just_restarted || !use_anderson
-            @. v1_v = damping_eff * Gv_v + (1 - damping_eff) * vold_v
-        else
-            if history < m
-                history += 1
-                new_col = history
-            else
-                @views ΔF[:, 1:(m - 1)] .= ΔF[:, 2:m]
-                @views ΔG[:, 1:(m - 1)] .= ΔG[:, 2:m]
-                new_col = m
-            end
-            @views ΔF[:, new_col] .= r_v .- rp_v
-            @views ΔG[:, new_col] .= Gv_v .- Gp_v
-
-            ΔFv = @view ΔF[:, 1:history]
-            ΔGv = @view ΔG[:, 1:history]
-            ATA = ΔFv' * ΔFv
-            ATr = ΔFv' * r_v
-            diag_mean = 0.0
-            @inbounds for j in 1:history
-                diag_mean += ATA[j, j]
-            end
-            diag_mean /= history
-            λ2 = reg_factor * diag_mean + 1e-30
-            @inbounds for j in 1:history
-                ATA[j, j] += λ2
-            end
-            γ = ATA \ ATr
-            v1 .= Gv
-            mul!(v1_v, ΔGv, γ, -1.0, 1.0)
-            @. v1_v = damping_eff * v1_v + (1 - damping_eff) * vold_v
-        end
-
-        rp_v .= r_v
-        Gp_v .= Gv_v
-    end
-
-    # max_iter exhausted: return best Gv (not the latest, which may be worse).
-    v1 .= Gv_best
-    @warn "Solver did not converge" max_iter tol abs_floor nrm_r0 nrm_r nrm_best n_restart
-    return max_iter, nrm_best, n_restart, nrm_r0
-end
-
-function compute_momentum(v_parts, w_parts)
-    p1 = sum(w_parts[α] * v_parts[α, 1] for α in axes(v_parts, 1))
-    p2 = sum(w_parts[α] * v_parts[α, 2] for α in axes(v_parts, 1))
-    return (p1, p2)
-end
-
-function compute_energy(v_parts, w_parts)
-    return 0.5 * sum(w_parts[α] * (v_parts[α, 1]^2 + v_parts[α, 2]^2)
-    for α in axes(v_parts, 1))
-end
-
-# Save f_s coefficient vector + breakpoints so post-run scripts can rebuild
-# the spline. (CSV chosen for diff-friendliness with the conservation CSV.)
-function save_fs_snapshot(ws::Workspace, suffix::String, step::Int,
-        f_coeffs::AbstractVector)
-    fname = "fs_snapshot_$(suffix)_step$(lpad(step, 4, '0')).csv"
-    open(fname, "w") do io
-        println(io, "# bp1=", join(ws.bp1, ","))
-        println(io, "# bp2=", join(ws.bp2, ","))
-        println(io, "# n_dofs=", ws.n_dofs)
-        println(io, "coeff")
-        for c in f_coeffs
-            println(io, c)
-        end
-    end
-    rclone_upload(suffix, fname)
-    return fname
-end
-
-# Plot 1D slices f_s(v1_fixed, v2) along v₂ at three fixed v₁ values, plus the
-# log10|f_s| heatmap with negative-value red overlay. Saves PNG.
-function plot_fs_diagnostics(ws::Workspace, f_coeffs::AbstractVector,
-        suffix::String, step::Int;
-        v1_slices::Vector{Float64} = [0.0, 0.5, 1.0],
-        n_v2::Int = 400, n_grid::Int = 200)
-    p = ws.p
-    f_s = build_field(ws, f_coeffs)
-
-    # 1D slices along v₂
-    v2_grid = collect(range(p.bp2[1], p.bp2[end]; length = n_v2))
-    fig = Figure(; size = (1300, 900))
-    ax_slice = Axis(fig[1, 1:2];
-        xlabel = "v₂", ylabel = "f_s",
-        title = "f_s slices along v₂  (suffix=$suffix, step=$step)")
-    palette = [:blue, :red, :green, :purple]
-    for (i, v1f) in enumerate(v1_slices)
-        vals = [begin
-                    loc = locate_particle(ws, v1f, v2)
-                    isnothing(loc) ? 0.0 : (evaluate(ws, f_s, loc)[1][1][1])
-                end
-                for v2 in v2_grid]
-        lines!(ax_slice, v2_grid, vals;
-            color = palette[mod1(i, length(palette))],
-            linewidth = 2, label = "v₁ = $v1f")
-    end
-    hlines!(ax_slice, [0.0]; color = :black, linestyle = :dash, linewidth = 1)
-    axislegend(ax_slice; position = :rt)
-
-    # log10|f_s| heatmap + negative mask
-    v1_grid = collect(range(p.bp1[1], p.bp1[end]; length = n_grid))
-    v2_grid_h = collect(range(p.bp2[1], p.bp2[end]; length = n_grid))
-    F = evaluate_on_grid(ws, f_s, v1_grid, v2_grid_h)
-
-    F_log = similar(F)
-    @inbounds for I in eachindex(F)
-        a = abs(F[I])
-        F_log[I] = a > 1e-30 ? log10(a) : -30.0
-    end
-    ax_h = Axis(fig[2, 1];
-        xlabel = "v₁", ylabel = "v₂",
-        title = "log10|f_s|", aspect = DataAspect())
-    hm = heatmap!(ax_h, v1_grid, v2_grid_h, F_log; colormap = :viridis)
-    Colorbar(fig[2, 1, Right()], hm)
-
-    neg_mask = map(x -> x < 0.0 ? 1.0 : NaN, F)
-    ax_n = Axis(fig[2, 2];
-        xlabel = "v₁", ylabel = "v₂",
-        title = "negative-region mask (red = f_s < 0)", aspect = DataAspect())
-    hm2 = heatmap!(ax_n, v1_grid, v2_grid_h, F_log; colormap = :viridis)
-    Colorbar(fig[2, 2, Right()], hm2)
-    heatmap!(ax_n, v1_grid, v2_grid_h, neg_mask;
-        colormap = [:transparent, :red], colorrange = (0.0, 1.0))
-
-    png_name = "fs_diag_$(suffix)_step$(lpad(step, 4, '0')).png"
-    save(png_name, fig)
-    println("Saved $png_name")
-    return png_name
-end
-
-# Per-run quick-look dashboard: conservation, residuals, projection-error,
-# negative-part. Main analytical payload is the conservation CSV.
-function plot_run_dashboard(ws::Workspace,
-        entropy_history, energy_history, momentum_history,
-        iter_history, res_history, fp_l2_history,
-        neg_history, suffix::String)
-    p = ws.p
-    steps = 0:p.N_STEPS
-
-    E0 = energy_history[1]
-    P0 = momentum_history[1]
-    E_err = [abs(energy_history[n + 1] - E0) / abs(E0) for n in steps]
-    P_err = [hypot(momentum_history[n + 1][1] - P0[1],
-                 momentum_history[n + 1][2] - P0[2]) /
-             max(hypot(P0[1], P0[2]), 1e-30) for n in steps]
-
-    fig = Figure(; size = (1200, 1500))
-
-    ax_S = Axis(fig[1, 1]; xlabel = "step", ylabel = "H_h",
-        title = "Entropy H_h (monotone increase expected)")
-    lines!(ax_S, collect(steps), entropy_history; color = :red, linewidth = 2)
-
-    ax_E = Axis(fig[2, 1]; xlabel = "step", ylabel = "rel. error",
-        title = "Energy conservation error", yscale = log10)
-    lines!(ax_E, collect(steps), max.(E_err, 1e-18); color = :blue, linewidth = 2)
-
-    ax_P = Axis(fig[3, 1]; xlabel = "step", ylabel = "rel. error",
-        title = "Momentum conservation error", yscale = log10)
-    lines!(ax_P, collect(steps), max.(P_err, 1e-18); color = :green, linewidth = 2)
-
-    ax_I = Axis(fig[4, 1]; xlabel = "step", ylabel = "iter",
-        title = "Inner-iteration count")
-    lines!(ax_I, 1:p.N_STEPS, iter_history; color = :black, linewidth = 2)
-
-    ax_R = Axis(fig[5, 1]; xlabel = "step", ylabel = "‖r‖",
-        title = "Picard fixed-point residual ‖G(v) − v‖₂", yscale = log10)
-    lines!(ax_R, 1:p.N_STEPS, max.(res_history, 1e-30); color = :purple, linewidth = 2)
-
-    ax_F = Axis(fig[6, 1]; xlabel = "step", ylabel = "‖f_s − f_p‖₂",
-        title = "Histogram-based projection error  ‖f_s − f_p‖₂")
-    lines!(ax_F, 1:p.N_STEPS, fp_l2_history; color = :orange, linewidth = 2)
-
-    ax_N = Axis(fig[7, 1]; xlabel = "step", ylabel = "∫max(−f_s,0)",
-        title = "Negative-part L¹ of f_s  (Gibbs oscillation indicator)")
-    lines!(ax_N, 1:p.N_STEPS, neg_history; color = :darkred, linewidth = 2)
-
-    png_name = "dashboard_$(suffix).png"
-    save(png_name, fig)
-    println("Saved $png_name")
-    return png_name
-end
+# The rest of the driver, included into `Main` so the `julia main.jl <preset>`
+# entry point and the runtime GPU swap below keep working unchanged.
+include("io.jl")       # rclone mirror, params record, checkpoints, cons CSV
+include("solver.jl")   # Picard map + Anderson solve, CPU/GPU hot-loop hooks
+include("plots.jl")    # fs_snapshot CSV + diagnostics PNGs
 
 function run_simulation(p::SimParameters; resume = nothing)
     print_summary(p)
@@ -490,7 +41,10 @@ function run_simulation(p::SimParameters; resume = nothing)
     println("Workspace: n_dofs=$(ws.n_dofs)  n_elements=$(ws.n_elements)")
 
     # ---- State init: either fresh sample or resume from checkpoint ----
+    cons_csv = "conservation_history_$(p.suffix).csv"
+    snap_csv = "particle_snapshots_$(p.suffix).csv"
     start_step = 0
+    t_start = 0.0          # physical time at start_step
     local v_particles, w_particles, f_coeffs
     local entropy_history, energy_history, momentum_history
     local iter_history, res_history, fp_l2_history, neg_history
@@ -517,7 +71,18 @@ function run_simulation(p::SimParameters; resume = nothing)
         start_step < p.N_STEPS || error(
             "Checkpoint step=$start_step ≥ N_STEPS=$(p.N_STEPS); nothing to do")
 
-        println("Resuming from step $start_step (running through $(p.N_STEPS))")
+        # The CSV may predate the `dt` column; normalise it before reading
+        # t_start out of it or appending rows in the new layout.
+        migrate_cons_csv!(cons_csv)
+
+        # Physical time across the resume: the checkpoint if it has one, else
+        # the migrated CSV, else assume DT never changed up to here.
+        t_start = hasproperty(ckpt, :t) ? ckpt.t :
+                  something(cons_time_at(cons_csv, start_step),
+                      start_step * p.DT)
+
+        println("Resuming from step $start_step, t=$t_start " *
+                "(running through $(p.N_STEPS) at DT=$(p.DT))")
     else
         v_particles = zeros(p.N_PARTICLES, 2)
         if p.v1_peak != 0.0
@@ -579,6 +144,11 @@ function run_simulation(p::SimParameters; resume = nothing)
     ΔF = zeros(2 * p.N_PARTICLES, p.m_anderson)
     ΔG = zeros(2 * p.N_PARTICLES, p.m_anderson)
 
+    p.solver in (:anderson, :newton) || error("unknown solver=$(p.solver)")
+    nk = p.solver === :newton ? NKWorkspace(2 * p.N_PARTICLES, p.nk_krylov_max) :
+         nothing
+    nk_fd_h = p.nk_fd_h > 0 ? p.nk_fd_h : (p.use_gpu && p.gpu_fp32 ? 1e-5 : 1e-6)
+
     # NN warm start (stateless — resume-safe without checkpoint changes).
     p.warmstart in (:euler, :nn) || error("unknown warmstart=$(p.warmstart)")
     nn_model = p.warmstart === :nn ? load_warmstart_model(p.nn_weights) : nothing
@@ -596,21 +166,17 @@ function run_simulation(p::SimParameters; resume = nothing)
     push!(snapshot_steps, p.N_STEPS)
     snapshots_v = Dict{Int, Matrix{Float64}}()
 
-    cons_csv = "conservation_history_$(p.suffix).csv"
-    snap_csv = "particle_snapshots_$(p.suffix).csv"
     if start_step == 0
         snapshots_v[0] = copy(v_particles)
         save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
         plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
         cons_io = open(cons_csv, "w")
-        println(cons_io,
-            "step,time,entropy,energy,momentum_1,momentum_2," *
-            "iter,residual,fp_minus_fs,neg_part,r0")
+        println(cons_io, join(CONS_COLS, ','))
         println(cons_io,
             "0,0.0,$(entropy_history[1]),$(energy_history[1])," *
             "$(momentum_history[1][1]),$(momentum_history[1][2])," *
-            "0,0.0,0.0,0.0,0.0")
+            "0,0.0,0.0,0.0,0.0,0.0")
         flush(cons_io)
         rclone_upload(p.suffix, cons_csv)
 
@@ -623,12 +189,14 @@ function run_simulation(p::SimParameters; resume = nothing)
 
         # Write a step-0 checkpoint so future runs can resume even before any
         # time-stepping completed (cheap and uniform).
-        save_checkpoint(p.suffix, 0, v_particles, w_particles, f_coeffs,
+        save_checkpoint(p.suffix, 0, 0.0, v_particles, w_particles, f_coeffs,
             entropy_history, energy_history, momentum_history,
             iter_history, res_history, fp_l2_history, neg_history,
             copy(Random.default_rng()))
     else
         # Resume: keep existing CSV rows ≤ start_step, append from now on.
+        truncate_csv_after(cons_csv, start_step)
+        truncate_csv_after(snap_csv, start_step)
         cons_io = open(cons_csv, "a")
         snap_io = open(snap_csv, "a")
     end
@@ -662,20 +230,33 @@ function run_simulation(p::SimParameters; resume = nothing)
             nn_warmstart_correct!(v1, nn_model, v_particles, dot_v, G,
                 w_particles, ws.bp1, ws.bp2, p.DT)
 
-        iter, res_final, n_rs, r0_init = step_anderson!(ws,
-            v1, v_particles, w_particles, S0, p.DT,
-            v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
-            r_vec, L_vec, G,
-            Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
-            m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
-            abs_floor = p.abs_floor,
-            stag_window = p.stag_window,
-            stag_rel_tol = p.stag_rel_tol,
-            damp_decay_start = p.damp_decay_start,
-            damp_decay_factor = p.damp_decay_factor,
-            damping = p.damping, use_anderson = p.use_anderson,
-            use_gonzalez = p.use_gonzalez,
-            verbose = (step <= 3))
+        iter, res_final, n_rs, r0_init = if nk === nothing
+            step_anderson!(ws,
+                v1, v_particles, w_particles, S0, p.DT,
+                v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
+                r_vec, L_vec, G,
+                Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
+                m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
+                abs_floor = p.abs_floor,
+                stag_window = p.stag_window,
+                stag_rel_tol = p.stag_rel_tol,
+                damp_decay_start = p.damp_decay_start,
+                damp_decay_factor = p.damp_decay_factor,
+                damping = p.damping, use_anderson = p.use_anderson,
+                use_gonzalez = p.use_gonzalez,
+                exit_picard_step = p.exit_picard_step,
+                verbose = (step <= start_step + 3))
+        else
+            step_newton!(ws,
+                v1, v_particles, w_particles, S0, p.DT,
+                v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
+                r_vec, L_vec, G, Gv, nk;
+                max_iter = p.max_iter, tol = p.tol, abs_floor = p.abs_floor,
+                fd_h = nk_fd_h, fd_rel = p.nk_fd_rel, eta_max = p.nk_eta_max,
+                use_gonzalez = p.use_gonzalez,
+                exit_picard_step = p.exit_picard_step,
+                verbose = (step <= start_step + 3))
+        end
         v_particles .= v1
 
         l2_project!(ws, f_coeffs, v_particles, w_particles)
@@ -689,12 +270,16 @@ function run_simulation(p::SimParameters; resume = nothing)
         push!(fp_l2_history, compute_fs_minus_fp_l2(ws, f_s, v_particles, w_particles))
         push!(neg_history, compute_negative_part_l1(ws, f_s))
 
+        # Accumulated from t_start, so a resume at a different DT extends the
+        # history instead of rescaling it.
+        t = t_start + (step - start_step) * p.DT
+
         # Append this step's conservation row (crash-safe).
-        let t = step * p.DT, P = momentum_history[end]
+        let P = momentum_history[end]
             println(cons_io,
                 "$step,$t,$(entropy_history[end]),$(energy_history[end])," *
                 "$(P[1]),$(P[2]),$iter,$res_final," *
-                "$(fp_l2_history[end]),$(neg_history[end]),$r0_init")
+                "$(fp_l2_history[end]),$(neg_history[end]),$r0_init,$(p.DT)")
             flush(cons_io)
         end
 
@@ -702,14 +287,16 @@ function run_simulation(p::SimParameters; resume = nothing)
             snapshots_v[step] = copy(v_particles)
             save_fs_snapshot(ws, p.suffix, step, f_coeffs)
             plot_fs_diagnostics(ws, f_coeffs, p.suffix, step)
-            let t = step * p.DT
-                for i in axes(v_particles, 1)
-                    println(snap_io,
-                        "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
-                end
-                flush(snap_io)
+            # `time` here is derived from `step`, and these files run to GB, so
+            # a resume does not rewrite them: rows a legacy run already wrote
+            # keep their `step * DT`. Take physical time from the conservation
+            # CSV, which the resume does migrate.
+            for i in axes(v_particles, 1)
+                println(snap_io,
+                    "$step,$t,$i,$(v_particles[i, 1]),$(v_particles[i, 2])")
             end
-            save_checkpoint(p.suffix, step, v_particles, w_particles, f_coeffs,
+            flush(snap_io)
+            save_checkpoint(p.suffix, step, t, v_particles, w_particles, f_coeffs,
                 entropy_history, energy_history, momentum_history,
                 iter_history, res_history, fp_l2_history, neg_history,
                 copy(Random.default_rng()))
@@ -719,7 +306,8 @@ function run_simulation(p::SimParameters; resume = nothing)
         end
 
         step % 25 == 0 &&
-            println("Step $step/$(p.N_STEPS)  iter=$iter  rs=$n_rs" *
+            println("Step $step/$(p.N_STEPS)  iter=$iter  " *
+                    (nk === nothing ? "rs=" : "newton=") * "$n_rs" *
                     "  ‖r‖=$(round(res_final; sigdigits=3))" *
                     "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
                     "  neg=$(round(neg_history[end]; sigdigits=4))" *
@@ -744,7 +332,8 @@ function run_simulation(p::SimParameters; resume = nothing)
     return (; entropy_history, energy_history, momentum_history,
         iter_history, res_history, fp_l2_history, neg_history,
         snapshots_v,
-        label = (p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
+        label = (p.solver === :newton ? "Newton–Krylov" :
+                 p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
 end
 
 function main(args = ARGS)
@@ -810,6 +399,9 @@ function main(args = ARGS)
         end
     end
 
+    params_file = "params_$(p.suffix).jl"
+    save_params(params_file, p)
+    rclone_upload(p.suffix, params_file)
     res = run_simulation(p; resume = resume)
     if isempty(res.iter_history)
         println("\n--- No new steps run (already at N_STEPS) ---")
@@ -821,4 +413,9 @@ function main(args = ARGS)
     end
 end
 
-main()
+# Run only when executed as a script (`julia main.jl ...`), so the test suite and
+# the REPL can `include` this file to reach the functions above without starting
+# a simulation.
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

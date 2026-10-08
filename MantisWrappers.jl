@@ -314,13 +314,16 @@ export evaluate_on_grid
 
 # Physics routines (l2_project!, compute_entropy, compute_r!, compute_G!,
 # compute_collision!) plus diagnostics (compute_negative_part,
-# compute_fp_minus_fs_l2). All take `ws::Workspace` as first argument.
+# compute_fp_minus_fs_l2, compute_momentum, compute_energy). All take
+# `ws::Workspace` as first argument except the particle moments, which are
+# mesh-independent.
 include("functions.jl")
 
 export compute_entropy, compute_r!, compute_G!, compute_collision!, l2_project!
 export eval_loggrad_at_particles!, compute_moments, compute_drift_multipliers,
        compute_LB_velocity!
 export compute_negative_part_l1, compute_fs_minus_fp_l2
+export compute_momentum, compute_energy
 export USE_LOGSQ
 
 end # module

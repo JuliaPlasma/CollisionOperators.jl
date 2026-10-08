@@ -1,11 +1,13 @@
 using CollisionOperators
 using Documenter
 
-DocMeta.setdocmeta!(CollisionOperators, :DocTestSetup, :(using CollisionOperators); recursive = true)
+# Defines the `Driver` module and the doctest setup. Kept in its own file because
+# the Doctests CI job includes it too, without running this script.
+include(joinpath(@__DIR__, "doctestsetup.jl"))
 
 makedocs(;
-    modules = [CollisionOperators],
-    authors = "Michael Kraus",
+    modules = [CollisionOperators, Driver],
+    authors = "Michael Kraus, Junyi Xu <junyixu0@gmail.com>",
     sitename = "CollisionOperators.jl",
     format = Documenter.HTML(;
         canonical = "https://JuliaPlasma.github.io/CollisionOperators.jl",
@@ -16,7 +18,12 @@ makedocs(;
         "Home" => "index.md",
         "Operators" => [
             "Lenard–Bernstein (2D)" => "lenard_bernstein.md"
-        ]
+        ],
+        "Gonzalez vs. plain midpoint" => "gonzalez_vs_midpoint.md",
+        "Cost of the implicit solve" => "implicit_solve_cost.md",
+        "Anderson window update" => "anderson_window.md",
+        "Newton–Krylov vs. Anderson" => "newton_krylov.md",
+        "Driver API" => "solver.md"
     ]
 )
 
