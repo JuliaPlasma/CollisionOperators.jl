@@ -3,9 +3,9 @@
 `use_gonzalez` switches the discrete gradient of the implicit step between the
 Gonzalez form and the plain implicit midpoint rule (see `picard_map!` in
 [`solver.jl`](https://github.com/junyixu/CollisionOperators.jl/blob/main/solver.jl)).
-Both were believed to increase the entropy monotonically. This page records a
-controlled comparison of the two, for the Landau operator, with the GPU collision
-kernel in FP32 and in FP64.
+Only the Gonzalez form has a mathematical proof of monotone entropy increase.
+This page records a controlled comparison of the two, for the Landau operator, with
+the GPU collision kernel in FP32 and in FP64.
 
 The expectation going in was: in FP64 the choice barely matters; in FP32
 Gonzalez does better. **The first half holds; the second does not.** In all 22
