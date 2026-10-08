@@ -42,13 +42,14 @@ jobs:
                   password: ${{ secrets.GITHUB_TOKEN }}
             # Cache busters for the dev-tools configs: a push to any of these
             # repos changes its REV, so only that layer onward is rebuilt.
-            - name: Resolve config revisions
+            - name: Resolve config revisions and image tags
               id: rev
               run: |
                   rev() { git ls-remote "https://github.com/junyixu/$1.git" "$2" | cut -f1; }
                   echo "nvim=$(rev nvim-config feat/nvim-full-flag)" >> "$GITHUB_OUTPUT"
                   echo "zsh=$(rev zsh-config-public main)" >> "$GITHUB_OUTPUT"
                   echo "yazi=$(rev yazi-config-public main)" >> "$GITHUB_OUTPUT"
+                  echo "repo_owner=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
             - uses: docker/build-push-action@v6
               with:
                   context: .
@@ -59,7 +60,7 @@ jobs:
                       ZSH_REV=${{ steps.rev.outputs.zsh }}
                       YAZI_REV=${{ steps.rev.outputs.yazi }}
                   tags: |
-                      ghcr.io/${{ github.repository_owner }}/collisionoperators:latest
-                      ghcr.io/${{ github.repository_owner }}/collisionoperators:${{ github.sha }}
+                      ghcr.io/${{ steps.rev.outputs.repo_owner }}/collisionoperators:latest
+                      ghcr.io/${{ steps.rev.outputs.repo_owner }}/collisionoperators:${{ github.sha }}
                   cache-from: type=gha
                   cache-to: type=gha,mode=max,ignore-error=true
