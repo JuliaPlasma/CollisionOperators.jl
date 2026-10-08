@@ -153,7 +153,7 @@ function NKWorkspace(n::Integer, krylov_max::Integer)
 end
 
 @doc raw"""
-    newton_krylov!(x, F!, nk::NKWorkspace; tol, max_evals, fd_rel,
+    newton_krylov!(x, F!, nk::NKWorkspace; tol, max_evals, fd_h,
                    eta_max = 0.9, eta_gamma = 0.9, armijo = 1e-4,
                    max_backtrack = 8, verbose = false)
 
@@ -168,13 +168,16 @@ forming ``J``: a Jacobian–vector product is the forward difference
 ```math
 J u \approx \frac{F(x + h u) - F(x)}{h},
 \qquad
-h = \texttt{fd\_rel}\cdot\max(\lVert x \rVert, 1)\,/\,\lVert u \rVert ,
+h = \texttt{fd\_h}\,/\,\lVert u \rVert ,
 ```
 
-so each GMRES iteration costs one residual evaluation. `fd_rel` should be about
-the square root of the relative noise in ``F``: a smaller ``h`` drowns the
-difference in rounding, and with an FP32 collision kernel the probe must also
-survive the cast of ``x`` to Float32.
+so each GMRES iteration costs one residual evaluation and the probe
+``x + h u`` always moves by exactly `fd_h`. The step is absolute on purpose. It
+must be small against the scale on which ``J`` changes, which can be far
+smaller than ``\lVert x \rVert``, and large against the noise in ``F``. For the
+Landau step a Taylor test puts the first limit near ``10^{-5}`` along its stiff
+direction, while a step scaled by ``\sqrt{\varepsilon}\,\lVert x \rVert`` comes out at
+``\approx 0.1`` in FP32 (see `docs/src/newton_krylov.md`).
 
 # Forcing term
 
@@ -206,7 +209,7 @@ failed) or `:budget` (`max_evals` reached). On `:stalled`/`:budget`, `x` and
 `nk.F` hold the best iterate seen. In every case `nk.F` holds ``F(x)``.
 """
 function newton_krylov!(x::AbstractVector, F!, nk::NKWorkspace;
-        tol::Real, max_evals::Integer, fd_rel::Real,
+        tol::Real, max_evals::Integer, fd_h::Real,
         eta_max::Real = 0.9, eta_gamma::Real = 0.9, armijo::Real = 1e-4,
         max_backtrack::Integer = 8, verbose::Bool = false)
     (; F, Ft, xt, xp, Fp, δ, x_best, F_best) = nk
@@ -222,9 +225,8 @@ function newton_krylov!(x::AbstractVector, F!, nk::NKWorkspace;
     verbose && println("    nk=0  evals=1  ‖F‖=$rnorm")
 
     # Matrix-free J u by forward difference about the current x (F holds F(x)).
-    h_scale = fd_rel * max(norm(x), 1.0)
     function jvp!(y, u)
-        h = h_scale / norm(u)
+        h = fd_h / norm(u)
         @. xp = x + h * u
         F!(Fp, xp)
         n_evals += 1
@@ -251,7 +253,6 @@ function newton_krylov!(x::AbstractVector, F!, nk::NKWorkspace;
             η_safe > 0.1 && (η_ew = max(η_ew, η_safe))
             η = clamp(η_ew, 0.5 * tol / rnorm, Float64(eta_max))
         end
-        h_scale = fd_rel * max(norm(x), 1.0)
 
         # Solve J δ = F, then step along -δ.
         k_lin, _ = gmres!(δ, jvp!, F, nk.gmres; rtol = η,

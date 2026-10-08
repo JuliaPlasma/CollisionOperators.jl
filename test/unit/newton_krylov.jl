@@ -50,7 +50,7 @@ end
     nk = NKWorkspace(n, 20)
     x = x0 .+ dt .* f(x0)                 # explicit Euler predictor
     n_evals, rnorm, n_newton, rnorm0, status = newton_krylov!(x, F!, nk;
-        tol = 1e-11, max_evals = 200, fd_rel = sqrt(eps()))
+        tol = 1e-11, max_evals = 200, fd_h = 1e-7)
     @test status === :converged
     @test rnorm < 1e-11
     @test norm(F!(similar(x), x)) ≈ rnorm atol = 1e-12
@@ -64,7 +64,7 @@ end
     # Budget exhaustion returns the best iterate and says so.
     x = x0 .+ dt .* f(x0)
     n_evals, rnorm_b, _, _, status = newton_krylov!(x, F!, nk;
-        tol = 1e-14, max_evals = 4, fd_rel = sqrt(eps()))
+        tol = 1e-14, max_evals = 4, fd_h = 1e-7)
     @test status === :budget
     @test n_evals ≤ 4
     @test norm(F!(similar(x), x)) ≈ rnorm_b
@@ -80,7 +80,7 @@ end
     nk = NKWorkspace(n, 20)
     x = copy(x0)
     n_evals, rnorm, _, _, status = newton_krylov!(x, F!, nk;
-        tol = 1e-10, max_evals = 10_000, fd_rel = 1e-3)
+        tol = 1e-10, max_evals = 10_000, fd_h = 5e-3)
     @test status === :stalled
     @test n_evals < 200
     @test rnorm < 1e-4

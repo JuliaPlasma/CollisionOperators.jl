@@ -14,7 +14,7 @@
 # Results and interpretation: docs/src/newton_krylov.md, "Taylor test of the
 # residual map".
 
-const REPO = ARGS[1]
+const REPO = abspath(ARGS[1])
 const CKPT = ARGS[2]
 const GONZ = length(ARGS) ≥ 3 ? parse(Bool, ARGS[3]) : true
 

@@ -83,9 +83,18 @@ Base.@kwdef struct SimParameters
     solver::Symbol = :anderson
     nk_krylov_max::Int = 30        # GMRES basis size per Newton step
     nk_eta_max::Float64 = 0.9      # Eisenstat–Walker forcing-term cap
-    # Relative finite-difference step for J·u. 0 = auto: √eps of the collision
-    # kernel's precision (Float32 when gpu_fp32, else Float64).
+    # Absolute finite-difference step for J·u (the probe moves by exactly this).
+    # 0 = auto: 1e-5 with the FP32 collision kernel, 1e-6 otherwise. A Taylor
+    # test puts the Landau map's linear range near 1e-5 along its stiff
+    # direction (docs/src/newton_krylov.md).
+    nk_fd_h::Float64 = 0.0
+    # Legacy relative step h = nk_fd_rel·‖v‖; > 0 overrides nk_fd_h. Only for
+    # reproducing the first runs (√eps·‖v‖ ≈ 0.1 in FP32, far too large).
     nk_fd_rel::Float64 = 0.0
+    # true = both solvers return G(v) on exit instead of the iterate v whose
+    # residual was measured (the earlier behaviour). For A/B runs only: the extra
+    # Picard update amplifies the error along the stiff direction.
+    exit_picard_step::Bool = false
 
     # Warm start for the implicit solve: :euler = explicit Euler predictor
     # (default, current behavior); :nn = Euler + Δt²·δ̂ MLP correction loaded
@@ -205,7 +214,9 @@ function print_summary(p::SimParameters)
     println("DT=$(p.DT)  N_STEPS=$(p.N_STEPS)")
     if p.solver === :newton
         println("solver=Newton–Krylov(krylov_max=$(p.nk_krylov_max), " *
-                "η_max=$(p.nk_eta_max), fd_rel=$(p.nk_fd_rel == 0 ? "auto" : p.nk_fd_rel))" *
+                "η_max=$(p.nk_eta_max), " *
+                (p.nk_fd_rel > 0 ? "fd_rel=$(p.nk_fd_rel)" :
+                 "fd_h=$(p.nk_fd_h == 0 ? "auto" : p.nk_fd_h)") * ")" *
                 "  tol=$(p.tol)  abs_floor=$(p.abs_floor)  max_iter=$(p.max_iter)")
     else
         println("solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *

@@ -147,8 +147,7 @@ function run_simulation(p::SimParameters; resume = nothing)
     p.solver in (:anderson, :newton) || error("unknown solver=$(p.solver)")
     nk = p.solver === :newton ? NKWorkspace(2 * p.N_PARTICLES, p.nk_krylov_max) :
          nothing
-    nk_fd_rel = p.nk_fd_rel > 0 ? p.nk_fd_rel :
-                sqrt(eps(p.use_gpu && p.gpu_fp32 ? Float32 : Float64))
+    nk_fd_h = p.nk_fd_h > 0 ? p.nk_fd_h : (p.use_gpu && p.gpu_fp32 ? 1e-5 : 1e-6)
 
     # NN warm start (stateless — resume-safe without checkpoint changes).
     p.warmstart in (:euler, :nn) || error("unknown warmstart=$(p.warmstart)")
@@ -245,6 +244,7 @@ function run_simulation(p::SimParameters; resume = nothing)
                 damp_decay_factor = p.damp_decay_factor,
                 damping = p.damping, use_anderson = p.use_anderson,
                 use_gonzalez = p.use_gonzalez,
+                exit_picard_step = p.exit_picard_step,
                 verbose = (step <= start_step + 3))
         else
             step_newton!(ws,
@@ -252,8 +252,9 @@ function run_simulation(p::SimParameters; resume = nothing)
                 v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
                 r_vec, L_vec, G, Gv, nk;
                 max_iter = p.max_iter, tol = p.tol, abs_floor = p.abs_floor,
-                fd_rel = nk_fd_rel, eta_max = p.nk_eta_max,
+                fd_h = nk_fd_h, fd_rel = p.nk_fd_rel, eta_max = p.nk_eta_max,
                 use_gonzalez = p.use_gonzalez,
+                exit_picard_step = p.exit_picard_step,
                 verbose = (step <= start_step + 3))
         end
         v_particles .= v1
