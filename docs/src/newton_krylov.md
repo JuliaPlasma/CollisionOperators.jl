@@ -267,14 +267,67 @@ including Julia startup and snapshot I/O.
   [Cost of the implicit solve](implicit_solve_cost.md) not to raise `DT` past
   `0.002` in FP32, which was measured at the preset `abs_floor = 1e-10`.
 
+## The exit update: residual vs. conservation
+
+Both solvers end a step with one extra Picard update: they return
+$G(x)$ for the accepted iterate $x$, but report $\lVert F(x)\rVert$. A Codex
+review flagged that the carried state's true residual is then unknown.
+`scripts/exit_update_check.jl` measured it on 30 FP64 steps (CPU, `DT = 0.005`,
+`abs_floor = 1e-10`). On all 6 steps that missed the target, and on 18 of the 24
+that converged, $\lVert F(G(x))\rVert > \lVert F(x)\rVert$. The median was about
+2×, and the worst was 19× on a converged step. That fits the stiff direction:
+there $\lVert Ju\rVert \approx 4$, so the update amplifies the error.
+
+Returning $x$ instead (`--exit_picard_step=false`) was A/B-tested on one RTX 4090
+(Secure), FP32, `abs_floor = 1e-8`, $t = 2 \to 3$:
+
+| run | evals | $\max_t\lvert\Delta S\rvert$ | energy drift $\Delta E/E$ | $\max\lvert\Delta P\rvert$ |
+|:--|--:|--:|--:|--:|
+| Anderson `DT = 0.005`, $G(x)$ exit | 6 085 | $1.84\times10^{-6}$ | $5.9\times10^{-11}$ | $9.3\times10^{-12}$ |
+| Anderson `DT = 0.005`, $x$ exit | 6 773 | $1.83\times10^{-6}$ | $1.8\times10^{-10}$ | $1.4\times10^{-11}$ |
+| Anderson `DT = 0.02`, $G(x)$ exit | 3 425 | $1.88\times10^{-6}$ | $2.5\times10^{-11}$ | $1.1\times10^{-11}$ |
+| Anderson `DT = 0.02`, $x$ exit | 3 036 | $1.93\times10^{-6}$ | $2.7\times10^{-10}$ | $4.0\times10^{-11}$ |
+| Newton `DT = 0.005`, $x$ exit | 7 582 | $2.70\times10^{-6}$ | $7.2\times10^{-7}$ | — |
+| Newton `DT = 0.02`, $x$ exit | 3 601 | $1.05\times10^{-5}$ | $4.2\times10^{-6}$ | $1.9\times10^{-10}$ |
+
+For comparison, Newton with the $G(x)$ exit in the DT sweep had energy drift
+$|\Delta E/E| \le 1.9\times10^{-8}$ and $\max\lvert\Delta S\rvert \le 1.8\times10^{-6}$.
+
+Returning $x$ buys no consistent saving: Anderson costs 11% more at `0.005` and
+11% less at `0.02`. It does cost conservation, and the reason is structural.
+With $m = \tfrac12(v_0 + x)$ and $F = x - G(x)$, the collision operator conserves
+momentum and energy at the state it is evaluated at, so
+
+```math
+P(G(x)) - P(v_0) = \Delta t \sum_\alpha w_\alpha \dot v_\alpha(m) = 0 ,
+\qquad
+P(x) - P(v_0) = \sum_\alpha w_\alpha F_\alpha ,
+```
+
+```math
+E(G(x)) - E(v_0) = -\tfrac{\Delta t}{2} \sum_\alpha w_\alpha F_\alpha \cdot \dot v_\alpha(m) ,
+\qquad
+E(x) - E(v_0) = \sum_\alpha w_\alpha\, m_\alpha \cdot F_\alpha .
+```
+
+The final Picard update projects the state back onto the conservation manifold:
+momentum exactly, and energy up to an error suppressed by $\Delta t$. Returning
+$x$ leaves conservation errors first order in the residual. That hurts most
+where the residual is largest, on Newton's stalled steps (up to
+$9\times10^{-3}$). The $G(x)$ exit stays the default. The reported residual
+remains that of $x$, typically a factor of about 2 below the carried state's.
+
 ## Consequences
 
 - Keep **Anderson with `abs_floor = 1e-8`** for FP32 production. A correctly
   sized Newton step brings Newton level with Anderson but not ahead of it.
-- If Newton is used, set the finite-difference step in **absolute** terms,
-  $h \sim 10^{-5}$, i.e. `--nk_fd_rel=3.5e-8`. The `sqrt(eps)` default is about
-  $10^4$ times too large for the stiff direction. It should become the default
-  before anything else is built on `--solver=newton`.
+- If Newton is used, the finite-difference step must be **absolute**. It now
+  is: `nk_fd_h` defaults to $10^{-5}$ with the FP32 kernel and $10^{-6}$
+  otherwise. The earlier `sqrt(eps)`-relative step, about $10^4$ times too large
+  for the stiff direction, survives only as the `nk_fd_rel` override.
+- Keep the final Picard update on exit (`exit_picard_step = true`, the default)
+  for both solvers. It is what makes the step conservative when the solve stops
+  short of the fixed point.
 - Forward-mode AD would compute the Jacobian product exactly, but $h \approx
   10^{-5}$ is already accurate enough ($h = 10^{-6}$ changes nothing), and AD would
   cost 2–3× more per product. It is not worth building for this problem.
@@ -293,6 +346,13 @@ including Julia startup and snapshot I/O.
 bash /root/run_nk_ab.sh       # 10 runs, ~80 min on an RTX 3070
 bash /root/run_nk_ablate.sh   # 3 runs, ~20 min, waits for the first script
 bash /root/run_nk_dt.sh       # 7 runs, DT sweep, ~26 min
+bash /root/run_exit_ab.sh     # 6 runs, exit-update A/B, ~20 min
+```
+
+The exit-update check runs locally on CPU (30 steps, about 15 minutes):
+
+```sh
+julia -t auto --project=. scripts/exit_update_check.jl . <checkpoint_step1500.jls> 30
 ```
 
 The Taylor test runs locally on CPU (about 1 s per evaluation at $N = 40\,000$

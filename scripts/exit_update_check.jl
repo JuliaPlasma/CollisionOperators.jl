@@ -65,7 +65,7 @@ for step in 1:NSTEPS
         stag_window = p.stag_window, stag_rel_tol = p.stag_rel_tol,
         damp_decay_start = p.damp_decay_start, damp_decay_factor = p.damp_decay_factor,
         damping = p.damping, use_gonzalez = p.use_gonzalez,
-        exit_picard_step = true)   # measure the earlier exit update
+        exit_picard_step = true)   # the default: return G(x_best)
 
     x = vec(copy(v1))
     Fx = F!(similar(x), x, v0, S0)

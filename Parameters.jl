@@ -91,10 +91,11 @@ Base.@kwdef struct SimParameters
     # Legacy relative step h = nk_fd_rel·‖v‖; > 0 overrides nk_fd_h. Only for
     # reproducing the first runs (√eps·‖v‖ ≈ 0.1 in FP32, far too large).
     nk_fd_rel::Float64 = 0.0
-    # true = both solvers return G(v) on exit instead of the iterate v whose
-    # residual was measured (the earlier behaviour). For A/B runs only: the extra
-    # Picard update amplifies the error along the stiff direction.
-    exit_picard_step::Bool = false
+    # true = both solvers return G(v), one final Picard update of the accepted
+    # iterate v: momentum is then conserved exactly and energy to O(Δt‖F‖).
+    # false = return v itself (smaller residual, but conservation errors first
+    # order in ‖F‖; 3–10x worse energy drift in the FP32 A/B). Keep true.
+    exit_picard_step::Bool = true
 
     # Warm start for the implicit solve: :euler = explicit Euler predictor
     # (default, current behavior); :nn = Euler + Δt²·δ̂ MLP correction loaded

@@ -237,17 +237,26 @@ least-squares problem is invariant under a common column permutation of
 
 # Exit conditions
 
-Any one of these ends the solve successfully. `v1` leaves holding the iterate
-whose residual is returned: the converged one, or on a stagnation or cap exit
-the best one seen, not merely the last. The returned residual is therefore the
-true residual of the state the driver carries forward.
+Any one of these ends the solve successfully. With `exit_picard_step = true`
+(the default) `v1` leaves holding ``G(v)`` for the converged iterate ``v``, or
+for the best one seen on a stagnation or cap exit. That final Picard update is
+what keeps the step conservative. With ``m = \tfrac12(v_0 + v)`` and
+``F = v - G(v)``, the collision operator conserves momentum and energy at ``m``,
+so
 
-`exit_picard_step = true` restores the earlier behaviour of returning ``G(v)``
-instead of ``v``, one free Picard update. It is kept for A/B runs only. Along
-the stiff direction of the Landau map the Picard update amplifies the error
-(``\lVert J u \rVert \approx 4``), so on FP64 runs it made the carried state's
-true residual about 2x larger than the one reported (median over 30 steps), and up to 19x
-(`scripts/exit_update_check.jl`).
+```math
+P(G(v)) - P(v_0) = 0 , \qquad
+E(G(v)) - E(v_0) = -\tfrac{\Delta t}{2} \textstyle\sum_\alpha w_\alpha F_\alpha \cdot \dot v_\alpha(m) ,
+```
+
+whereas returning ``v`` itself leaves ``\sum_\alpha w_\alpha F_\alpha`` and
+``\sum_\alpha w_\alpha m_\alpha \cdot F_\alpha``, first order in the residual. The
+returned residual is ``\lVert F(v) \rVert``, not that of ``G(v)``. Along the stiff
+direction of the Landau map the update amplifies the residual (a median of about
+2x over 30 FP64 steps, `scripts/exit_update_check.jl`), which is the price of
+exact momentum conservation. `exit_picard_step = false` returns ``v`` instead;
+an FP32 A/B showed no cost benefit from it, and 3–10x worse energy drift
+(`docs/src/newton_krylov.md`).
 
 1. **Residual.** ``\lVert r \rVert < \max(\texttt{tol} \cdot \lVert v \rVert, \texttt{abs\_floor})``.
    `abs_floor` caps how tight the solve is asked to be: below the numerical noise
@@ -278,7 +287,7 @@ function step_anderson!(ws::Workspace,
         restart_factor = Inf, damping = 0.5,
         reg_factor = 1e-10, verbose = false,
         use_anderson::Bool = true, use_gonzalez::Bool = true,
-        exit_picard_step::Bool = false)
+        exit_picard_step::Bool = true)
     v1_v = vec(v1)
     Gv_v = vec(Gv)
     r_v = vec(r_curr)
@@ -295,8 +304,8 @@ function step_anderson!(ws::Workspace,
 
     # Track the best iterate so stagnation / max_iter exits return it rather than
     # the latest (which may be worse on a non-monotone trajectory). By default
-    # that is the iterate v whose residual was measured; `exit_picard_step`
-    # keeps G(v) instead, the pre-2026-10 behaviour, whose residual is unknown.
+    # that is G(v), whose final Picard update restores momentum and energy
+    # conservation; `exit_picard_step = false` keeps the iterate v instead.
     v_best = copy(v1)
     nrm_best_window = Inf  # nrm_best snapshot from `stag_window` iters ago
 
@@ -395,7 +404,7 @@ end
     step_newton!(ws, v1, v0, w_parts, S0, dt, ..., Gv, nk::NKWorkspace;
                  max_iter = 1000, tol = 1e-12, abs_floor = 1e-7, fd_h = 1e-5,
                  fd_rel = 0.0, eta_max = 0.9, verbose = false,
-                 use_gonzalez = true, exit_picard_step = false)
+                 use_gonzalez = true, exit_picard_step = true)
 
 Solve the same implicit step as [`step_anderson!`](@ref) by Jacobian-free
 Newton–Krylov ([`newton_krylov!`](@ref)) on the residual of the Picard map,
@@ -412,9 +421,9 @@ directly comparable: the target is
 ``\max(\texttt{tol}\cdot\lVert v \rVert, \texttt{abs\_floor})``, `max_iter`
 caps the number of Picard-map evaluations, and the returned count is the number
 of evaluations — each finite-difference Jacobian product and each line-search
-trial is one. On exit `v1` holds the iterate whose residual is returned, as in
-`step_anderson!`; `exit_picard_step = true` restores the earlier extra Picard
-update ``\mathcal{G}(v) = v - F(v)``.
+trial is one. On exit `v1` takes the final Picard update
+``\mathcal{G}(v) = v - F(v)``, as in `step_anderson!`, which restores momentum and
+energy conservation; `exit_picard_step = false` returns ``v`` itself.
 
 The finite-difference step is the absolute `fd_h` (see [`newton_krylov!`](@ref)).
 `fd_rel > 0` overrides it with the earlier relative scaling
@@ -429,7 +438,7 @@ function step_newton!(ws::Workspace,
         r_vec, L_vec, G_buf, Gv, nk::NKWorkspace;
         max_iter = 1000, tol = 1e-12, abs_floor = 1e-7, fd_h = 1e-5,
         fd_rel = 0.0, eta_max = 0.9, verbose = false, use_gonzalez::Bool = true,
-        exit_picard_step::Bool = false)
+        exit_picard_step::Bool = true)
     N = size(v0, 1)
     Gv_v = vec(Gv)
     function residual!(F, v)
