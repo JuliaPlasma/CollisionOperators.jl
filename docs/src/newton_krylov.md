@@ -45,8 +45,12 @@ unrestarted GMRES (`gmres!`, modeled on Krylov.jl's
   8 halvings fail, the residual has reached the noise floor of $F$ and the step
   exits with the best iterate seen.
 
-The stopping rule is the same as Anderson's,
+The stopping rule has the same form as Anderson's,
 $\lVert F\rVert < \max(\texttt{tol}\cdot\lVert v\rVert, \texttt{abs\_floor})$.
+Anderson re-evaluates $\lVert v\rVert$ at every iterate; Newton evaluates it once,
+at the predictor. Within one step $\lVert v\rVert$ changes by about $10^{-3}$
+relative, and $\texttt{tol}\cdot\lVert v\rVert \approx 2.85\times10^{-10}$ only
+binds when `abs_floor` is below it, so the difference is negligible.
 Both solvers write **Picard-map evaluations** to the `iter` column, counting every
 Jacobian product and every line-search trial, so the counts compare directly.
 The cost per evaluation is the same for both (one $O(N^2)$ pair sum), so wall
@@ -110,7 +114,7 @@ comparison is about.
 
 In FP64 the totals are even, but they come about differently. Anderson is
 cheaper on a typical step and pays for a tail of stagnation exits. Newton costs
-more on every step and has no such tail. It does, however, leave one step at
+more on a typical step (median 32 evaluations against 19) and has no such tail. It does, however, leave one step at
 $2.4\times10^{-3}$, where its line search gave up early.
 
 ### Ablation, FP32, `abs_floor = 1e-8`
@@ -178,6 +182,15 @@ $F/\lVert F\rVert$, 0.09 in a random direction.
   base map. A plausible but unverified source is particles in low-density
   regions, where $\nabla f/f$ is large and sensitive to position.
 
+The reference product $Ju$ carries its own error, $O(h^2)$ from the central
+difference, and it enters $r$ as a term linear in $\varepsilon$. Comparing $h = 10^{-4}$
+with $h = 10^{-6}$ along $F/\lVert F\rVert$ at the solution puts that error near
+$2\times10^{-4}$. That is about 3% of $r$ at $\varepsilon = 10^{-6}$, comparable
+to $r$ at $10^{-7}$, and dominant from $10^{-8}$ down. The smallest-$\varepsilon$
+slopes are therefore not evidence either way. The conclusions above use
+$\varepsilon \ge 10^{-6}$ for the slope and the curvature, and
+$\varepsilon \ge 10^{-5}$ for the size of the model error.
+
 The script is `scripts/taylor_test.jl`.
 
 ## Why Newton lost
@@ -243,6 +256,15 @@ $2\times10^{-7}$ off that reference at $t = 2$.
 
 A check run at $h \approx 10^{-6}$ (`--nk_fd_rel=3.5e-9`, `DT = 0.005`) needed
 7 572 evaluations, so $h \approx 10^{-5}$ already resolves the stiff direction.
+
+The final defaults (absolute `nk_fd_h = 1e-5`, $G(x)$ exit) were confirmed with
+`--solver=newton` and no other flags, at `DT = 0.01` on one RTX 4090 (Secure):
+4 497 evaluations against Anderson's 4 214 on the same pod (1.07×). Entropy error
+was $1.80\times10^{-6}$ against $2.26\times10^{-6}$, energy drift
+$3.0\times10^{-9}$ against $1.4\times10^{-10}$, and momentum drift
+$\le 1.3\times10^{-11}$ for both. The run reproduces the sweep's Newton count
+(4 438) to 1.3%. Anderson's count differs by 6% from the 3070 run, which is
+host-to-host variation.
 The wall times were 295 / 269 s, 185 / 189 s and 151 / 149 s (Newton / Anderson),
 including Julia startup and snapshot I/O.
 

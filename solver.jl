@@ -418,7 +418,10 @@ is ``I - O(\Delta t)``, so GMRES needs few iterations per Newton step.
 
 The stopping rule and the cost unit match `step_anderson!`, so the two are
 directly comparable: the target is
-``\max(\texttt{tol}\cdot\lVert v \rVert, \texttt{abs\_floor})``, `max_iter`
+``\max(\texttt{tol}\cdot\lVert v \rVert, \texttt{abs\_floor})``, with
+``\lVert v \rVert`` taken once at the predictor rather than at every iterate (a
+negligible difference: it changes by about ``10^{-3}`` relative within a step),
+`max_iter`
 caps the number of Picard-map evaluations, and the returned count is the number
 of evaluations — each finite-difference Jacobian product and each line-search
 trial is one. On exit `v1` takes the final Picard update
