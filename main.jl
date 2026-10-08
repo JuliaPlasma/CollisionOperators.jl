@@ -245,7 +245,7 @@ function run_simulation(p::SimParameters; resume = nothing)
                 damp_decay_factor = p.damp_decay_factor,
                 damping = p.damping, use_anderson = p.use_anderson,
                 use_gonzalez = p.use_gonzalez,
-                verbose = (step <= 3))
+                verbose = (step <= start_step + 3))
         else
             step_newton!(ws,
                 v1, v_particles, w_particles, S0, p.DT,
@@ -254,7 +254,7 @@ function run_simulation(p::SimParameters; resume = nothing)
                 max_iter = p.max_iter, tol = p.tol, abs_floor = p.abs_floor,
                 fd_rel = nk_fd_rel, eta_max = p.nk_eta_max,
                 use_gonzalez = p.use_gonzalez,
-                verbose = (step <= 3))
+                verbose = (step <= start_step + 3))
         end
         v_particles .= v1
 
