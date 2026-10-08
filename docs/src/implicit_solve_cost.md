@@ -127,11 +127,16 @@ checkpoint, `DT = 0.005`, fp32, each validated point by point against the fp64
 | `1e-8` | **32.1** | **6\,430** | 36/200 | $1.85\times10^{-6}$ | $3.0\times10^{-8}$ | 298.1 s |
 | `1e-7` (signature default) | 28.9 | 5\,770 | 35/200 | $1.83\times10^{-6}$ | $3.0\times10^{-8}$ | 273.5 s |
 
-**The accuracy column does not move.** $1.84\times10^{-6}$ is the `DT = 0.005`
-time-step error against the `DT = 0.001` reference; it is identical whether the
-solve stops at $3\times10^{-10}$ or at $2\times10^{-4}$, so the 14\,450 extra
-iterations the tight floor buys are spent entirely below the discretisation
-error. The iteration histogram tells the same story from the other side: at
+**The accuracy column does not move.** The deviation from the `DT = 0.001`
+reference is $1.84\times10^{-6}$ whether the solve stops at $3\times10^{-10}$ or
+at $2\times10^{-4}$, so the 14\,450 extra iterations the tight floor buys do not
+show in the result. That deviation is not the `DT = 0.005` time-step error. A
+later sweep at `abs_floor = 1e-8` gives the same $1.8$–$2.2\times10^{-6}$ at
+`DT = 0.01` and `0.02`, where a second-order step error would be 4× and 16×
+larger (see [DT sweep with a correctly sized step](@ref) in
+[Newton–Krylov vs. Anderson](newton_krylov.md)). The time-step error at
+`DT = 0.005` is therefore well below $10^{-6}$, and the source of the
+$\sim2\times10^{-6}$ floor is not identified. The iteration histogram tells the same story from the other side: at
 `1e-10` the counts are $\{90, 120, 150, 180\}$ — nothing but stagnation windows —
 while at `1e-8` they fall back to 10–19, a healthy Anderson convergence.
 
@@ -175,8 +180,17 @@ the solution.
 
 ## Consequences
 
-- **Do not tune `DT` upward past `0.002` in fp32** expecting wall time back. In
-  fp64 the step size behaves as ordinary second-order theory suggests.
+- **At the preset `abs_floor = 1e-10`, do not tune `DT` upward past `0.002` in
+  fp32** expecting wall time back. In fp64 the step size behaves as ordinary
+  second-order theory suggests. This is a property of the unreachable target,
+  not of fp32. At `abs_floor = 1e-8` the Anderson cost per unit physical time
+  keeps falling: 5.8–6.4k evaluations at `DT = 0.005`, 4.2–4.5k at `0.01`,
+  3.4k at `0.02` ($t\,2\to3$; ranges span runs on different hosts). That is
+  about 40% less from `0.005` to `0.02`, with an unchanged entropy deviation of
+  about $2\times10^{-6}$. Beyond `0.02` is untested. The share of steps that miss
+  the target rises with `DT` (12–14% at `0.005`, 42–44% at `0.02`), consistent
+  with an fp32 noise floor that grows with `DT`, so at larger steps `1e-8` may in
+  turn become unreachable.
 - **fp32 is still the right default on consumer GPUs, by less than it looks.**
   Same RTX 4090, `DT = 0.002`, 500 steps covering $t\,1\to2$: fp32 704.5 s over
   22\,508 iterations (31.3 ms/iteration) against fp64 1767.2 s over 12\,707
