@@ -20,7 +20,9 @@ makedocs(;
             "Lenard–Bernstein (2D)" => "lenard_bernstein.md"
         ],
         "Gonzalez vs. plain midpoint" => "gonzalez_vs_midpoint.md",
+        "Cost of the implicit solve" => "implicit_solve_cost.md",
         "Anderson window update" => "anderson_window.md",
+        "Newton–Krylov vs. Anderson" => "newton_krylov.md",
         "Driver API" => "solver.md"
     ]
 )

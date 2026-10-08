@@ -76,6 +76,27 @@ Base.@kwdef struct SimParameters
     damp_decay_start::Int = 200    # iter index after which damping is decayed
     damp_decay_factor::Float64 = 0.5  # damping multiplier once decay starts
 
+    # Implicit solver: :anderson = Anderson-accelerated Picard (`step_anderson!`);
+    # :newton = Jacobian-free Newton–Krylov (`step_newton!`). Both share `tol`,
+    # `abs_floor` and `max_iter` (a cap on Picard-map evaluations), and both log
+    # evaluations in the `iter` column, so runs compare one-to-one.
+    solver::Symbol = :anderson
+    nk_krylov_max::Int = 30        # GMRES basis size per Newton step
+    nk_eta_max::Float64 = 0.9      # Eisenstat–Walker forcing-term cap
+    # Absolute finite-difference step for J·u (the probe moves by exactly this).
+    # 0 = auto: 1e-5 with the FP32 collision kernel, 1e-6 otherwise. A Taylor
+    # test puts the Landau map's linear range near 1e-5 along its stiff
+    # direction (docs/src/newton_krylov.md).
+    nk_fd_h::Float64 = 0.0
+    # Legacy relative step h = nk_fd_rel·‖v‖; > 0 overrides nk_fd_h. Only for
+    # reproducing the first runs (√eps·‖v‖ ≈ 0.1 in FP32, far too large).
+    nk_fd_rel::Float64 = 0.0
+    # true = both solvers return G(v), one final Picard update of the accepted
+    # iterate v: momentum is then conserved exactly and energy to O(Δt‖F‖).
+    # false = return v itself (smaller residual, but conservation errors first
+    # order in ‖F‖; 3–10x worse energy drift in the FP32 A/B). Keep true.
+    exit_picard_step::Bool = true
+
     # Warm start for the implicit solve: :euler = explicit Euler predictor
     # (default, current behavior); :nn = Euler + Δt²·δ̂ MLP correction loaded
     # from `nn_weights` (see warmstart_nn.jl).
@@ -192,8 +213,17 @@ function print_summary(p::SimParameters)
     println("P_DEG=$(p.P_DEG)  K_REG=$(p.K_REG)  N_QUAD=$(p.N_QUAD)")
     println("N_PARTICLES=$(p.N_PARTICLES)  σ=($(p.σ1), $(p.σ2))  seed=$(p.seed)")
     println("DT=$(p.DT)  N_STEPS=$(p.N_STEPS)")
-    println("solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *
-            "  damping=$(p.damping)  tol=$(p.tol)  max_iter=$(p.max_iter)")
+    if p.solver === :newton
+        println("solver=Newton–Krylov(krylov_max=$(p.nk_krylov_max), " *
+                "η_max=$(p.nk_eta_max), " *
+                (p.nk_fd_rel > 0 ? "fd_rel=$(p.nk_fd_rel)" :
+                 "fd_h=$(p.nk_fd_h == 0 ? "auto" : p.nk_fd_h)") * ")" *
+                "  tol=$(p.tol)  abs_floor=$(p.abs_floor)  max_iter=$(p.max_iter)")
+    else
+        println("solver=$(p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard")" *
+                "  damping=$(p.damping)  tol=$(p.tol)  abs_floor=$(p.abs_floor)" *
+                "  max_iter=$(p.max_iter)")
+    end
     println("collision=$(p.collision_model)$(p.collision_model == :lb ? "  ν=$(p.nu)" : "")" *
             "  disc_grad=$(p.use_gonzalez ? "Gonzalez" : "plain-midpoint")" *
             "  entropy_integrand=$(p.use_logsq ? "½log f²" : "clamped log f")")

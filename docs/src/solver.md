@@ -16,7 +16,7 @@ Anderson-accelerated fixed-point iteration that solves it.
 
 ```@autodocs
 Modules = [Driver]
-Order = [:function, :constant]
+Order = [:type, :function, :constant]
 ```
 
 ## Configuration and workspace

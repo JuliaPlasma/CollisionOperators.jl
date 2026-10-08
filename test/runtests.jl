@@ -6,6 +6,8 @@ if "core" in GROUPS
     @safetestset "Aqua" include("quality/aqua.jl")
     # io.jl needs only Parameters.jl, so its helpers run on every core pass.
     @safetestset "io.jl helpers" include("unit/io_helpers.jl")
+    # newton_krylov.jl is generic over plain vectors, so it runs here too.
+    @safetestset "GMRES / Newton–Krylov" include("unit/newton_krylov.jl")
 end
 
 # main.jl is a script that pulls CairoMakie and Mantis, so the kernels reachable
