@@ -13,7 +13,7 @@
 # ARGS[2:]  : zero or more `--key=value` overrides applied on top of PARAMS
 #
 # Diagnostics pushed to CSV every step:
-#   iter        : Picard iterations used
+#   iter        : Picard-map evaluations used (Anderson or Newton–Krylov)
 #   residual    : ‖G(v) − v‖₂ at the converged iterate
 #   fp_minus_fs : ‖f_s − f_p‖₂  (histogram-based projection-error norm)
 #   neg_part    : ∫ max(−f_s, 0) dv  (Gibbs negative-part L¹)
@@ -144,6 +144,12 @@ function run_simulation(p::SimParameters; resume = nothing)
     ΔF = zeros(2 * p.N_PARTICLES, p.m_anderson)
     ΔG = zeros(2 * p.N_PARTICLES, p.m_anderson)
 
+    p.solver in (:anderson, :newton) || error("unknown solver=$(p.solver)")
+    nk = p.solver === :newton ? NKWorkspace(2 * p.N_PARTICLES, p.nk_krylov_max) :
+         nothing
+    nk_fd_rel = p.nk_fd_rel > 0 ? p.nk_fd_rel :
+                sqrt(eps(p.use_gpu && p.gpu_fp32 ? Float32 : Float64))
+
     # NN warm start (stateless — resume-safe without checkpoint changes).
     p.warmstart in (:euler, :nn) || error("unknown warmstart=$(p.warmstart)")
     nn_model = p.warmstart === :nn ? load_warmstart_model(p.nn_weights) : nothing
@@ -225,20 +231,31 @@ function run_simulation(p::SimParameters; resume = nothing)
             nn_warmstart_correct!(v1, nn_model, v_particles, dot_v, G,
                 w_particles, ws.bp1, ws.bp2, p.DT)
 
-        iter, res_final, n_rs, r0_init = step_anderson!(ws,
-            v1, v_particles, w_particles, S0, p.DT,
-            v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
-            r_vec, L_vec, G,
-            Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
-            m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
-            abs_floor = p.abs_floor,
-            stag_window = p.stag_window,
-            stag_rel_tol = p.stag_rel_tol,
-            damp_decay_start = p.damp_decay_start,
-            damp_decay_factor = p.damp_decay_factor,
-            damping = p.damping, use_anderson = p.use_anderson,
-            use_gonzalez = p.use_gonzalez,
-            verbose = (step <= 3))
+        iter, res_final, n_rs, r0_init = if nk === nothing
+            step_anderson!(ws,
+                v1, v_particles, w_particles, S0, p.DT,
+                v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
+                r_vec, L_vec, G,
+                Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
+                m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
+                abs_floor = p.abs_floor,
+                stag_window = p.stag_window,
+                stag_rel_tol = p.stag_rel_tol,
+                damp_decay_start = p.damp_decay_start,
+                damp_decay_factor = p.damp_decay_factor,
+                damping = p.damping, use_anderson = p.use_anderson,
+                use_gonzalez = p.use_gonzalez,
+                verbose = (step <= 3))
+        else
+            step_newton!(ws,
+                v1, v_particles, w_particles, S0, p.DT,
+                v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
+                r_vec, L_vec, G, Gv, nk;
+                max_iter = p.max_iter, tol = p.tol, abs_floor = p.abs_floor,
+                fd_rel = nk_fd_rel, eta_max = p.nk_eta_max,
+                use_gonzalez = p.use_gonzalez,
+                verbose = (step <= 3))
+        end
         v_particles .= v1
 
         l2_project!(ws, f_coeffs, v_particles, w_particles)
@@ -288,7 +305,8 @@ function run_simulation(p::SimParameters; resume = nothing)
         end
 
         step % 25 == 0 &&
-            println("Step $step/$(p.N_STEPS)  iter=$iter  rs=$n_rs" *
+            println("Step $step/$(p.N_STEPS)  iter=$iter  " *
+                    (nk === nothing ? "rs=" : "newton=") * "$n_rs" *
                     "  ‖r‖=$(round(res_final; sigdigits=3))" *
                     "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
                     "  neg=$(round(neg_history[end]; sigdigits=4))" *
@@ -313,7 +331,8 @@ function run_simulation(p::SimParameters; resume = nothing)
     return (; entropy_history, energy_history, momentum_history,
         iter_history, res_history, fp_l2_history, neg_history,
         snapshots_v,
-        label = (p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
+        label = (p.solver === :newton ? "Newton–Krylov" :
+                 p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
 end
 
 function main(args = ARGS)

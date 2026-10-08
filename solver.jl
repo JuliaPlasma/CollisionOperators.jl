@@ -1,12 +1,15 @@
 # solver.jl — the implicit time step: one Picard map of the Gonzalez
-# discrete-gradient (or Lenard–Bernstein) update, and the Anderson-accelerated
-# fixed-point iteration that solves it. Pure compute: no file I/O, no plotting.
+# discrete-gradient (or Lenard–Bernstein) update, and the two solvers for its
+# fixed point: Anderson-accelerated Picard and Jacobian-free Newton–Krylov.
+# Pure compute: no file I/O, no plotting.
 #
 # Needs `Workspace` plus the physics in functions.jl, so main.jl includes this
 # after MantisWrappers. The CPU/GPU hot-loop hooks live here because this is
 # their only hot call site; main() repoints them at startup.
 
 using LinearAlgebra: norm, mul!, ldiv!
+
+include("newton_krylov.jl")   # generic GMRES + JFNK, wired up by step_newton!
 
 """
     COLLISION_FN, L2PROJ_FN, COMPG_FN, LOGGRAD_FN
@@ -374,4 +377,56 @@ function step_anderson!(ws::Workspace,
     v1 .= Gv_best
     @warn "Solver did not converge" max_iter tol abs_floor nrm_r0 nrm_r nrm_best n_restart
     return max_iter, nrm_best, n_restart, nrm_r0
+end
+
+@doc raw"""
+    step_newton!(ws, v1, v0, w_parts, S0, dt, ..., Gv, nk::NKWorkspace;
+                 max_iter = 1000, tol = 1e-12, abs_floor = 1e-7, fd_rel,
+                 eta_max = 0.9, verbose = false, use_gonzalez = true)
+
+Solve the same implicit step as [`step_anderson!`](@ref) by Jacobian-free
+Newton–Krylov ([`newton_krylov!`](@ref)) on the residual of the Picard map,
+
+```math
+F(v) = v - \mathcal{G}(v), \qquad \mathcal{G} = \texttt{picard\_map!} ,
+```
+
+from the predictor already in `v1`. The Jacobian ``I - \partial\mathcal{G}/\partial v``
+is ``I - O(\Delta t)``, so GMRES needs few iterations per Newton step.
+
+The stopping rule and the cost unit match `step_anderson!`, so the two are
+directly comparable: the target is
+``\max(\texttt{tol}\cdot\lVert v \rVert, \texttt{abs\_floor})``, `max_iter`
+caps the number of Picard-map evaluations, and the returned count is the number
+of evaluations — each finite-difference Jacobian product and each line-search
+trial is one. On exit `v1` takes the free extra Picard update
+``\mathcal{G}(v) = v - F(v)``, as Anderson's exit does.
+
+Returns `(n_evals, ‖F‖, n_newton, ‖F₀‖)`; the third slot is the restart count in
+`step_anderson!`.
+"""
+function step_newton!(ws::Workspace,
+        v1, v0, w_parts, S0, dt,
+        v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
+        r_vec, L_vec, G_buf, Gv, nk::NKWorkspace;
+        max_iter = 1000, tol = 1e-12, abs_floor = 1e-7, fd_rel,
+        eta_max = 0.9, verbose = false, use_gonzalez::Bool = true)
+    N = size(v0, 1)
+    Gv_v = vec(Gv)
+    function residual!(F, v)
+        picard_map!(ws, Gv, reshape(v, N, 2), v0, w_parts, S0, dt,
+            v_mid, dv, dS_mid, G_eff, dot_v_buf, f_buf,
+            r_vec, L_vec, G_buf; use_gonzalez = use_gonzalez)
+        @. F = v - Gv_v
+        return F
+    end
+
+    v1_v = vec(v1)
+    eff_tol = max(tol * (norm(v1_v) + 1e-30), abs_floor)
+    n_evals, nrm, n_newton, nrm0, status = newton_krylov!(v1_v, residual!, nk;
+        tol = eff_tol, max_evals = max_iter, fd_rel = fd_rel,
+        eta_max = eta_max, verbose = verbose)
+    @. v1_v -= nk.F
+    verbose && println("    [$status]  evals=$n_evals  newton=$n_newton  ‖F‖=$nrm")
+    return n_evals, nrm, n_newton, nrm0
 end
