@@ -19,6 +19,7 @@ makedocs(;
         "Operators" => [
             "Lenard–Bernstein (2D)" => "lenard_bernstein.md"
         ],
+        "Gonzalez vs. plain midpoint" => "gonzalez_vs_midpoint.md",
         "Anderson window update" => "anderson_window.md",
         "Driver API" => "solver.md"
     ]
