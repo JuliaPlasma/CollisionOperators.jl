@@ -12,6 +12,11 @@ released yet — there are no tags, and the repository holds two commits, both f
 
 ## [Unreleased] — targeting 1.0.0
 
+### Changed
+
+- CI uploads coverage from the `Julia 1 - ubuntu-latest` job instead of `Julia min`, and a test
+  job saves the Julia cache only when it succeeds.
+
 ### New Features
 
 ### Bug Fixes
