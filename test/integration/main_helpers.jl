@@ -5,7 +5,7 @@
 # testset below shares that load — it pulls CairoMakie and Mantis, which are
 # slow. That include doubles as a smoke test that the driver's include chain
 # (io.jl / solver.jl / plots.jl) still loads. The dependency-free CSV and
-# checkpoint helpers are covered separately in unit/io_helpers.jl.
+# checkpoint helpers are covered separately in integration/io_helpers.jl.
 using Test
 
 include(joinpath(@__DIR__, "..", "..", "main.jl"))
