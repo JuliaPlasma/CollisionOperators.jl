@@ -42,6 +42,10 @@ function run_simulation(p::SimParameters; resume = nothing)
 
     # ---- State init: either fresh sample or resume from checkpoint ----
     cons_csv = "conservation_history_$(p.suffix).csv"
+    # Per-step solver cost: `inner` is the restart count (:anderson), Newton steps
+    # (:newton) or cheap inner maps (:defect); times in seconds, measured in process
+    # (the log is block-buffered and cannot be used for timing).
+    stats_csv = "solver_stats_$(p.suffix).csv"
     snap_csv = "particle_snapshots_$(p.suffix).csv"
     start_step = 0
     t_start = 0.0          # physical time at start_step
@@ -144,7 +148,15 @@ function run_simulation(p::SimParameters; resume = nothing)
     ΔF = zeros(2 * p.N_PARTICLES, p.m_anderson)
     ΔG = zeros(2 * p.N_PARTICLES, p.m_anderson)
 
-    p.solver in (:anderson, :newton) || error("unknown solver=$(p.solver)")
+    p.solver in (:anderson, :newton, :defect) || error("unknown solver=$(p.solver)")
+    if p.solver === :defect
+        p.collision_model == :landau || error("solver=:defect is Landau-only")
+        p.use_gpu && p.gpu_fp32 &&
+            error("solver=:defect needs the FP64 pair kernel (gpu_fp32=false)")
+    end
+    dc = p.solver === :defect ?
+         (A = zeros(p.N_PARTICLES, 3), Gk = zeros(p.N_PARTICLES, 2),
+        Φu = zeros(p.N_PARTICLES, 2)) : nothing
     nk = p.solver === :newton ? NKWorkspace(2 * p.N_PARTICLES, p.nk_krylov_max) :
          nothing
     nk_fd_h = p.nk_fd_h > 0 ? p.nk_fd_h : (p.use_gpu && p.gpu_fp32 ? 1e-5 : 1e-6)
@@ -171,6 +183,9 @@ function run_simulation(p::SimParameters; resume = nothing)
         save_fs_snapshot(ws, p.suffix, 0, f_coeffs)
         plot_fs_diagnostics(ws, f_coeffs, p.suffix, 0)
 
+        stats_io = open(stats_csv, "w")
+        println(stats_io, join(STATS_COLS, ','))
+        flush(stats_io)
         cons_io = open(cons_csv, "w")
         println(cons_io, join(CONS_COLS, ','))
         println(cons_io,
@@ -199,9 +214,17 @@ function run_simulation(p::SimParameters; resume = nothing)
         truncate_csv_after(snap_csv, start_step)
         cons_io = open(cons_csv, "a")
         snap_io = open(snap_csv, "a")
+        if isfile(stats_csv)
+            truncate_csv_after(stats_csv, start_step)
+            stats_io = open(stats_csv, "a")
+        else
+            stats_io = open(stats_csv, "w")
+            println(stats_io, join(STATS_COLS, ','))
+        end
     end
 
     for step in (start_step + 1):p.N_STEPS
+        t_step0 = time_ns()
         S0 = entropy_history[end]
 
         # Explicit predictor for the Anderson initial guess. Landau uses the
@@ -230,7 +253,7 @@ function run_simulation(p::SimParameters; resume = nothing)
             nn_warmstart_correct!(v1, nn_model, v_particles, dot_v, G,
                 w_particles, ws.bp1, ws.bp2, p.DT)
 
-        iter, res_final, n_rs, r0_init = if nk === nothing
+        iter, res_final, n_rs, r0_init = if p.solver === :anderson
             step_anderson!(ws,
                 v1, v_particles, w_particles, S0, p.DT,
                 v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
@@ -246,7 +269,7 @@ function run_simulation(p::SimParameters; resume = nothing)
                 use_gonzalez = p.use_gonzalez,
                 exit_picard_step = p.exit_picard_step,
                 verbose = (step <= start_step + 3))
-        else
+        elseif p.solver === :newton
             step_newton!(ws,
                 v1, v_particles, w_particles, S0, p.DT,
                 v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
@@ -256,7 +279,20 @@ function run_simulation(p::SimParameters; resume = nothing)
                 use_gonzalez = p.use_gonzalez,
                 exit_picard_step = p.exit_picard_step,
                 verbose = (step <= start_step + 3))
+        else
+            step_defect!(ws,
+                v1, v_particles, w_particles, S0, p.DT,
+                v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
+                r_vec, L_vec, G,
+                Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG, dc.A, dc.Gk, dc.Φu;
+                m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
+                abs_floor = p.abs_floor, damping = p.damping,
+                eta = p.dc_eta, max_inner = p.dc_max_inner,
+                stag_window = p.dc_stag_window, stag_rel_tol = p.stag_rel_tol,
+                use_gonzalez = p.use_gonzalez,
+                verbose = (step <= start_step + 3))
         end
+        t_solve = (time_ns() - t_step0) / 1e9
         v_particles .= v1
 
         l2_project!(ws, f_coeffs, v_particles, w_particles)
@@ -303,11 +339,16 @@ function run_simulation(p::SimParameters; resume = nothing)
             # Mirror the growing conservation CSV at snapshot cadence (not every
             # step — that would spawn an rclone process per timestep).
             rclone_upload(p.suffix, cons_csv)
+            rclone_upload(p.suffix, stats_csv)
         end
+
+        println(stats_io, "$step,$iter,$n_rs,$t_solve,$((time_ns() - t_step0) / 1e9)")
+        flush(stats_io)
 
         step % 25 == 0 &&
             println("Step $step/$(p.N_STEPS)  iter=$iter  " *
-                    (nk === nothing ? "rs=" : "newton=") * "$n_rs" *
+                    (p.solver === :anderson ? "rs=" : p.solver === :newton ? "newton=" : "inner=") *
+                    "$n_rs" *
                     "  ‖r‖=$(round(res_final; sigdigits=3))" *
                     "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
                     "  neg=$(round(neg_history[end]; sigdigits=4))" *
@@ -319,8 +360,10 @@ function run_simulation(p::SimParameters; resume = nothing)
     dump_io !== nothing && close(dump_io)
     close(cons_io)
     close(snap_io)
+    close(stats_io)
     # Final mirror so the last steps (if not a multiple of 25) reach S3 too.
     rclone_upload(p.suffix, cons_csv)
+    rclone_upload(p.suffix, stats_csv)
     println("Saved $cons_csv")
     println("Saved $snap_csv")
 
@@ -333,7 +376,50 @@ function run_simulation(p::SimParameters; resume = nothing)
         iter_history, res_history, fp_l2_history, neg_history,
         snapshots_v,
         label = (p.solver === :newton ? "Newton–Krylov" :
+                 p.solver === :defect ? "defect correction" :
                  p.use_anderson ? "Anderson(m=$(p.m_anderson))" : "Picard"))
+end
+
+"""
+    enable_gpu!(p)
+
+Load the CUDA kernels and repoint the hot-loop hooks ([`COLLISION_FN`](@ref) and
+friends) at them. Called at run time, so every call through the hooks must go via
+`invokelatest`. Shared by `main` and scripts/check_metric_gpu.jl.
+"""
+function enable_gpu!(p::SimParameters)
+    println("GPU enabled — loading CUDA…")
+    # collision_gpu.jl provides _upload_col! (shared staging helper) plus the
+    # O(N²) Landau kernels; projection_gpu.jl provides the P_DEG=2 particle↔
+    # spline kernels used by BOTH operators.
+    include(joinpath(@__DIR__, "collision_gpu.jl"))
+    if p.P_DEG == 2
+        include(joinpath(@__DIR__, "projection_gpu.jl"))
+        L2PROJ_FN[] = getglobal(Main, :l2_project_gpu!)
+        COMPG_FN[] = getglobal(Main, :compute_G_gpu!)
+        println("GPU projection chain enabled (P_DEG=2 kernels)")
+    else
+        @warn "use_gpu: projection kernels are P_DEG=2-specialized; " *
+              "projection stays on CPU for P_DEG=$(p.P_DEG)"
+    end
+
+    if p.collision_model == :lb
+        # LB has no O(N²) sum: GPU accelerates the projection + log-gradient
+        # gather (the ~40 ms/iter bulk); the O(N) drift stays on CPU.
+        if p.P_DEG == 2
+            LOGGRAD_FN[] = getglobal(Main, :eval_loggrad_gpu!)
+            println("GPU LB log-gradient enabled")
+        end
+    else
+        if p.gpu_fp32
+            println("  ⚠ FP32 collision kernel (conservation experiment)")
+            COLLISION_FN[] = getglobal(Main, :compute_collision_gpu32!)
+        else
+            COLLISION_FN[] = getglobal(Main, :compute_collision_gpu!)
+        COLLMETRIC_FN[] = getglobal(Main, :compute_collision_metric_gpu!)
+        end
+    end
+    return nothing
 end
 
 function main(args = ARGS)
@@ -366,38 +452,7 @@ function main(args = ARGS)
     params_loaded = include(joinpath(@__DIR__, preset))
     p = parse_overrides(params_loaded::SimParameters, overrides)
 
-    if p.use_gpu
-        println("GPU enabled — loading CUDA…")
-        # collision_gpu.jl provides _upload_col! (shared staging helper) plus the
-        # O(N²) Landau kernels; projection_gpu.jl provides the P_DEG=2 particle↔
-        # spline kernels used by BOTH operators.
-        include(joinpath(@__DIR__, "collision_gpu.jl"))
-        if p.P_DEG == 2
-            include(joinpath(@__DIR__, "projection_gpu.jl"))
-            L2PROJ_FN[] = getglobal(Main, :l2_project_gpu!)
-            COMPG_FN[] = getglobal(Main, :compute_G_gpu!)
-            println("GPU projection chain enabled (P_DEG=2 kernels)")
-        else
-            @warn "use_gpu: projection kernels are P_DEG=2-specialized; " *
-                  "projection stays on CPU for P_DEG=$(p.P_DEG)"
-        end
-
-        if p.collision_model == :lb
-            # LB has no O(N²) sum: GPU accelerates the projection + log-gradient
-            # gather (the ~40 ms/iter bulk); the O(N) drift stays on CPU.
-            if p.P_DEG == 2
-                LOGGRAD_FN[] = getglobal(Main, :eval_loggrad_gpu!)
-                println("GPU LB log-gradient enabled")
-            end
-        else
-            if p.gpu_fp32
-                println("  ⚠ FP32 collision kernel (conservation experiment)")
-                COLLISION_FN[] = getglobal(Main, :compute_collision_gpu32!)
-            else
-                COLLISION_FN[] = getglobal(Main, :compute_collision_gpu!)
-            end
-        end
-    end
+    p.use_gpu && enable_gpu!(p)
 
     params_file = "params_$(p.suffix).jl"
     save_params(params_file, p)
