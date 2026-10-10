@@ -81,6 +81,14 @@ Base.@kwdef struct SimParameters
     # `abs_floor` and `max_iter` (a cap on Picard-map evaluations), and both log
     # evaluations in the `iter` column, so runs compare one-to-one.
     solver::Symbol = :anderson
+    # :defect = defect correction around a frozen metric (`step_defect!`, Landau
+    # only, FP64 pair kernel): `iter` then counts full maps (outer iterations) and
+    # solver_stats_<suffix>.csv the cheap inner maps. Pays off where the pair sum
+    # dominates the cost (FP64 on consumer GPUs), not in FP32; see
+    # docs/src/defect_correction.md.
+    dc_eta::Float64 = 0.05         # inner tolerance, relative to the outer residual
+    dc_max_inner::Int = 60         # cap on inner maps per outer iteration
+    dc_stag_window::Int = 5        # outer iterations between stagnation checks
     nk_krylov_max::Int = 30        # GMRES basis size per Newton step
     nk_eta_max::Float64 = 0.9      # Eisenstat–Walker forcing-term cap
     # Absolute finite-difference step for J·u (the probe moves by exactly this).
