@@ -61,6 +61,18 @@ per cell, so the entropy gradient $G$ there is particle noise that changes every
 step (step-to-step correlation 0.22–0.29). Neither per-particle features nor the
 particles' history predict it. The same analysis pointed to the structure used below.
 
+A probe on 60 sampled steps (RTX 3080, $N = 40\,000$, `scripts/predictor_probe.jl` on the
+`feat/warmstart-nn` branch) then tested two cheaper uses of that structure:
+
+- **Per-particle preconditioner.** Anderson on $v \mapsto v + P(\mathcal{G}(v) - v)$ with
+  $P_\gamma = (I - J_{\gamma\gamma})^{-1}$, built from the 2×2 diagonal blocks of the Picard-map
+  Jacobian. It did not reduce the iterations. The blocks are tiny, with median norm below
+  0.002, so the slow convergence is collective rather than per particle.
+- **Cheap start.** Moving only each particle's own $G$ under a frozen metric removed
+  0.2–0.9 decades of the Euler error, but saved at most 1–2 iterations.
+
+What did work was using the frozen metric for a whole inner solve, described next.
+
 ## The method
 
 ### The metric split
@@ -233,6 +245,35 @@ both, by 1.42× and 2.08×.
 The RTX 3080 probe that first suggested the method had $K \approx 220$ ms, and estimated
 1.3–2.2× from map counts alone. The RTX 3070 runs, which include the Anderson overhead of
 the inner iterations, land in the same range.
+
+## Choosing a card
+
+The cards differ in two ways that are easy to mix up:
+
+- **Absolute speed.** The A100 and H100 run FP64 at full rate, so every method is fastest
+  there. Even the best RTX 4090 result, 1.85 s per step on sq_d04 with defect correction, is
+  slower than plain Anderson on the A100 (0.74 s) or the H100 (0.50 s).
+- **Gain from defect correction.** This is the ratio to Anderson on the same card. It is
+  largest on the cards with the weakest FP64, because the method trades pair sums for
+  cheap inner maps, and the trade pays only when the pair sum is expensive.
+
+Price changes the picture again. The table gives the faster of the two methods on `main`
+(Anderson or defect correction) for each card. It shows the implicit-solve time for the
+1000 steps (the sum of `t_solve`, without start-up, snapshots or plots) and its cost at the
+Runpod list prices of 2026-10-09, in USD per hour: RTX 3070 0.13 (Community only), RTX 4090
+0.34 / 0.89, A100 SXM 1.39 / 1.79 and H100 SXM 2.69 / 3.99 (Community / Secure).
+
+| card | bimodal: method, time | cost, Community / Secure | sq_d04: method, time | cost, Community / Secure |
+|:--|:--|--:|:--|--:|
+| RTX 3070 | defect, 1.11 h | \$0.14 / — | defect, 1.11 h | \$0.14 / — |
+| RTX 4090 | Anderson, 0.48 h | \$0.16 / \$0.43 | defect, 0.51 h | \$0.18 / \$0.46 |
+| A100 | Anderson, 0.13 h | \$0.18 / \$0.23 | Anderson, 0.21 h | \$0.29 / \$0.37 |
+| H100 | Anderson, 0.09 h | \$0.25 / \$0.37 | Anderson, 0.14 h | \$0.38 / \$0.56 |
+
+The RTX 3070 with defect correction gives the cheapest result, but takes 8–12× longer
+than the H100. The H100 gives the fastest result at about twice the cost. Without defect
+correction the RTX 3070 would cost \$0.21 and \$0.30, so on that card the method halves the
+cost of sq_d04. Community cards were often out of stock during these runs.
 
 ## Conclusions
 
