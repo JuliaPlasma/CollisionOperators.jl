@@ -10,30 +10,32 @@ This page compares three ways of solving the implicit Landau step in FP64:
    inner model of the step, corrected by one full Picard map per outer iteration.
 
 All three reach the same fixed point and return it through the same conservative
-final Picard update. The comparison ran on three GPUs whose FP64 throughput differs by
-a factor of about 16: an RTX 4090, an A100 and an H100.
+final Picard update. The comparison ran on four GPUs whose FP64 pair sum takes from
+313 ms down to 5 ms: an RTX 3070, an RTX 4090, an A100 and an H100. The RTX 3070 ran
+Anderson and defect correction only.
 
 **Summary.**
 
 - **Iterations.** Defect correction needs 2.2–3.5× fewer full maps per step (7.2–7.5
-  against 16–26) and almost never stalls: 0–1 stalled steps in 1000, against 20–110 for
+  against 16–26) and almost never stalls: 0–2 stalled steps in 1000, against 20–110 for
   Anderson.
-- **Conservation.** Without stalls, its energy drift after 1000 steps is 10–380×
-  smaller: $10^{-14}$–$10^{-13}$ against $2\times10^{-13}$–$10^{-12}$ (bimodal), and
-  $10^{-13}$–$10^{-12}$ against $4$–$6\times10^{-11}$ (sq_d04). Momentum stays at
+- **Conservation.** Without stalls, its energy drift after 1000 steps is 10–550×
+  smaller: $5\times10^{-15}$–$10^{-13}$ against $2\times10^{-13}$–$10^{-12}$ (bimodal), and
+  $6\times10^{-14}$–$10^{-12}$ against $3$–$6\times10^{-11}$ (sq_d04). Momentum stays at
   roundoff ($\le 2\times10^{-14}$) for all three methods.
-- **Wall time.** This depends on the card. On the RTX 4090 it is **1.47× faster than
-  Anderson on sq_d04** and ties on bimodal (1.03×). On the A100 and H100 it is 1.3–2.0×
-  slower. Each cheap inner map still costs 11–18 ms of per-iteration overhead that does
-  not depend on the card, and a step needs about 50 of them.
+- **Wall time.** This depends on the card. On the RTX 3070 it is **1.42× faster than
+  Anderson on bimodal and 2.08× faster on sq_d04**. On the RTX 4090 it is 1.47× faster on
+  sq_d04 and ties on bimodal (1.03×). On the A100 and H100 it is 1.3–2.0× slower. Each
+  cheap inner map still costs 9–18 ms of per-iteration overhead that does not depend on
+  the card, and a step needs about 50 of them.
 - **Frozen-metric start.** It saves 1–2 full maps per step, which is worth −11 % to +14 % in
   time depending on card and case. That is not a reliable gain.
 - **When defect correction pays.** It pays when the FP64 pair sum $K$ is expensive
   compared with the per-iteration overhead $O$. The threshold falls the more Anderson
   stalls: $K/O \gtrsim 6$ on bimodal, $\gtrsim 2$ on sq_d04 (see
-  [Cost model](#Cost-model)). Consumer cards with 1/64-rate FP64 meet it: the RTX 4090
-  has $K/O \approx 3$, and the RTX 30 series about 10. The A100 and H100 have
-  $K/O < 1$ and do not.
+  [Cost model](#Cost-model)). Consumer cards with 1/64-rate FP64 meet it: the RTX 3070
+  has $K/O \approx 9$ and wins on both cases, and the RTX 4090 has $K/O \approx 3$ and
+  wins on sq_d04. The A100 and H100 have $K/O < 1$ and do not.
 
 ## Background: why not a better initial guess?
 
@@ -142,10 +144,11 @@ $A$ costs 1.25–1.34× the plain kernel at $N = 40\,000$. Every run also writes
   $N = 40\,000$, `DT = 0.001`, 1000 steps from $t = 0$, seed 42, FP64 pair kernel,
   `abs_floor = 1e-10`, `snap_every = 100`.
 - **Cards.** RTX 4090 (Secure, EUR-IS-1), A100 SXM 80 GB (Secure, US-WA-1) and H100
-  SXM (Secure, AP-IN-1). Commits `f24b3ce` and `8e52179` on `feat/warmstart-nn` (comment-only difference); the
-  solver code is the same as on `main`.
+  SXM (Secure, AP-IN-1) ran commits `f24b3ce` and `8e52179` on `feat/warmstart-nn`
+  (comment-only difference). The RTX 3070 (Community) ran `main` at `d07857b`, with
+  Anderson and defect correction only. The solver code is the same in all of them.
 - **Runs.** `logs/run_methods.sh` in the Runpod workspace runs the kernel check and
-  then the six runs per card, one after another. Data are under
+  then the runs of one card, one after another. Data are under
   `mpcdf-s3:collision-operators/meth-*-2026-10-09`, and the figures come from
   `plot_solver_methods.jl` in the plotting repository.
 - **History.** For comparison, earlier FP64 Anderson runs of the same setups: the original
@@ -185,14 +188,16 @@ same card:
 
 | case | card | Anderson | frozen start | defect |
 |:--|:--|--:|--:|--:|
+| bimodal | RTX 3070 | 5.70 | — | **4.01 (0.70×)** |
 | bimodal | RTX 4090 | 1.74 | 1.67 (0.96×) | 1.80 (1.03×) |
 | bimodal | A100 | 0.46 | 0.45 (0.97×) | 0.92 (2.01×) |
 | bimodal | H100 | 0.33 | 0.38 (1.14×) | 0.65 (1.97×) |
+| sq_d04 | RTX 3070 | 8.27 | — | **3.98 (0.48×)** |
 | sq_d04 | RTX 4090 | 2.72 | 2.81 (1.04×) | **1.85 (0.68×)** |
 | sq_d04 | A100 | 0.74 | 0.66 (0.89×) | 0.93 (1.26×) |
 | sq_d04 | H100 | 0.50 | 0.53 (1.05×) | 0.90 (1.79×) |
 
-![Seconds per step by card and method (top) and relative to Anderson on the same card (bottom).](assets/solver_methods_walltime.png)
+![Seconds per step by card and method (top) and relative to Anderson on the same card (bottom). The RTX 3070 ran no frozen-start runs.](assets/solver_methods_walltime.png)
 
 ### Cost model
 
@@ -205,6 +210,7 @@ the defect runs:
 
 | card | full map | $K$ | $O$ | $K/O$ | inner map $c$ |
 |:--|--:|--:|--:|--:|--:|
+| RTX 3070 | 347 ms | 313 ms | 34 ms | 9.2–9.3 | 9–14 ms |
 | RTX 4090 | 106–107 ms | 79.9 ms | 26–28 ms | 2.9–3.1 | 17–18 ms |
 | A100 | 27–29 ms | 12.8 ms | 14–17 ms | 0.8–0.9 | 13.4 ms |
 | H100 | 18–19 ms | 5.0 ms | 13–14 ms | 0.4 | 11–13 ms |
@@ -221,17 +227,19 @@ The threshold depends on how often Anderson stalls. On bimodal Anderson needs ab
 per step, and defect correction pays from $K/O \approx 6$. On sq_d04 about 100 stalled steps of
 60–120 maps each raise Anderson's mean to about 25, and the threshold drops to
 $K/O \approx 2$. The RTX 4090, at $K/O \approx 3$, sits between the two, so the method ties
-on bimodal and wins on sq_d04.
+on bimodal and wins on sq_d04. The RTX 3070, at $K/O \approx 9$, is above both and wins on
+both, by 1.42× and 2.08×.
 
-The RTX 3080 probe that first suggested the method had $K \approx 220$ ms, so
-$K/O \approx 10$. There it measured 1.3–2.2× in map-equivalents. Those counts left out
-the inner iterations' Anderson overhead, which this run includes.
+The RTX 3080 probe that first suggested the method had $K \approx 220$ ms, and estimated
+1.3–2.2× from map counts alone. The RTX 3070 runs, which include the Anderson overhead of
+the inner iterations, land in the same range.
 
 ## Conclusions
 
-- In FP64 on consumer GPUs, defect correction is the better solver when Anderson
-  stalls often: 1.47× faster on sq_d04 on the RTX 4090, with energy drift 300× smaller.
-  On data-centre GPUs with full-rate FP64 (A100, H100), Anderson stays the fastest.
+- In FP64 on consumer GPUs, defect correction is the better solver: 1.42× (bimodal) and
+  2.08× (sq_d04) faster on the RTX 3070, 1.47× faster on sq_d04 on the RTX 4090, with energy
+  drift 45–550× smaller in those runs. On data-centre GPUs with full-rate FP64 (A100, H100),
+  Anderson stays the fastest.
 - Defect correction removes stalls and the energy drift they cause on every card. It
   needs 2.2–3.5× fewer full maps.
 - The frozen-metric start does not give a reliable gain.
