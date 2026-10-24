@@ -15,6 +15,9 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 
 - CI uploads coverage from the `Julia 1 - ubuntu-latest` job instead of `Julia min`, and a test
   job saves the Julia cache only when it succeeds.
+- **The Julia floor is 1.12** (`491cde3`). `[compat]` declares `julia = "1.12"`, so a caller on
+  Julia 1.11 cannot install this version. The change is compat-only: the bound, and the CI that
+  targets it.
 
 ### New Features
 
