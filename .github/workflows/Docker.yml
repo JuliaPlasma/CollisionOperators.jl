@@ -29,8 +29,8 @@ jobs:
             # short on disk once the base image and build cache are added.
             - name: Free disk space
               run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
-            # `COPY .` bakes .git into the image: don't leave the job token in
-            # .git/config, or `git pull` inside a pod fails once it expires.
+            # `COPY .` bakes .git into the image: keep the job's credentials
+            # out of its config, so `git pull` inside a pod stays anonymous.
             - uses: actions/checkout@v7
               with:
                   persist-credentials: false
