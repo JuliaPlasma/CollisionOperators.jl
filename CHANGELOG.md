@@ -80,3 +80,13 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 - Test suite restructured with `SafeTestsets` with GROUPS; test dependencies moved to
   `test/Project.toml`, `[extras]`/`[targets]` removed, and empty template testset deleted.
   `test/quality/aqua.jl` runs Aqua with stale_deps marked @test_broken for issue #22.
+- `test/Project.toml` bounds Aqua at 0.8.18 instead of 0.8. The CI Downgrade job resolves
+  `Project.toml` and `test/Project.toml` together at their lower bounds on Julia 1.12, and Aqua
+  0.8.0 to 0.8.13 error in the piracy check there with
+  ``FieldError: type Core.TypeName has no field `mt` ``. Aqua 0.8.14 reads `Core.methodtable`, but
+  its persistent-tasks check resolves the environment of its precompilation subprocess anew, so at
+  the lower bounds that subprocess compiles newer versions than the test process has loaded, and
+  in the Downgrade job it did not exit within the check's time limit. Aqua 0.8.17 gives the
+  subprocess the loaded versions, but errors at these lower bounds: `LogExpFunctions` 0.3.29 also
+  lists its weak dependencies in `[deps]`, and 0.8.17 looks for `ChangesOfVariables`, which is not
+  installed. Aqua 0.8.18 is the first release that passes.
