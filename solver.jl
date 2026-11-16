@@ -479,7 +479,7 @@ The solve stops when the outer residual ``\lVert \mathcal{G}(v) - v \rVert`` fal
 ``\max(\texttt{tol} \cdot \lVert v \rVert, \texttt{abs\_floor})``, and the exit returns
 ``\mathcal{G}(v)`` computed with the antisymmetric pair sum, so momentum and energy are
 conserved exactly as in `step_fixed_point!`. Every `stag_window` outer
-iterations, a best residual that fell by less than `stag_rel_tol` ends the solve with
+iterations (`main.jl` passes `p.dc_stag_window`), a best residual that fell by less than `stag_rel_tol` ends the solve with
 the best ``\mathcal{G}(v)``. `max_iter` caps the outer iterations.
 
 Measured (N = 40k, FP64, RTX 3080 probe): 6–11 outer iterations per step against

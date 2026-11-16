@@ -85,7 +85,7 @@ RUN find ~/.local/share/nvim/lazy ~/.local/share/zinit -path '*/lazy/blink.cmp/.
 # Runpod's base image: its default CMD starts sshd from the PUBLIC_KEY env var.
 FROM runpod/base:1.0.2-ubuntu2404
 
-ARG JULIA_VERSION=1.12.7
+ARG JULIA_VERSION=1.13.4
 
 # Precompiled package images are CPU-specific. Build for the same multi-target
 # set as the official Julia binaries, so the images stay valid on whatever host

@@ -64,7 +64,8 @@ compute_G!(ws, G, v0, L_vec)
 compute_collision!(ws, dot_v, v0, w, G)
 v_pred = vec(v0 .+ dt .* dot_v)
 
-# Converged point: Anderson to the FP64 target.
+# Converged point: Anderson to the FP64 target. `max_iter` caps the iterations of
+# the method, not the map evaluations that `it` counts.
 v_star = reshape(copy(v_pred), N, 2)
 t0 = time()
 it, res, _, r0 = step_fixed_point!(ws, v_star, v0, w, S0, dt,

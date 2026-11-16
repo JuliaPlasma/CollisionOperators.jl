@@ -94,6 +94,11 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
   `test/Project.toml`, `docs/Project.toml` and the GPU image's `docker/Project.toml` take it
   from a `[sources]` git entry pinned to commit `96b2540` of its `main`; `[compat]` bounds it at
   0.1. `docker/Project.toml` declares `julia = "1.13"` as well.
+- **The GPU image runs Julia 1.13.4 and CUDA 6.5.1.** `GeometricSolvers` at `96b2540` declares
+  `CUDA = "6.5.1 - 6"`, so `docker/Project.toml` bounds CUDA at 6.5.1 instead of 6.4.0, the
+  Dockerfile installs Julia 1.13.4 instead of 1.12.7, and `docker/Manifest.toml` is resolved
+  again on Julia 1.13.4 with CUDA 6.5.1 and `GeometricSolvers`: 118 of the 318 packages it
+  keeps change version, 25 are added and 11 removed. The toolkit pin of `docker/LocalPreferences.toml` (12.8) stays.
 - `[compat]` now bounds every registered dependency instead of only `julia`: CairoMakie 0.15.12,
   DelimitedFiles 1.9.1, FileIO 1.19.0, ForwardDiff 1, Mantis 0.6 and PNGFiles 0.4.5.
   Until now the package carried no bound on any of them, so a resolve could pick a version whose

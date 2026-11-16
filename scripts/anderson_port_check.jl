@@ -143,9 +143,11 @@ end
 # converged, and step 24, on which both solves meet their stop test and differ by the
 # spread of two converged solutions.
 # A drift is no worse when it stays below the before-run's or below `ROUNDOFF`, ten
-# units of round-off: the momentum drift of both runs is a few units of round-off,
-# while a step that returns its iterate without the final Picard update drifts by
-# about the residual.
+# units of round-off: the momentum drift of both runs is a few units of round-off.
+# This test does not catch a solve that returns its iterate without the final Picard
+# update: on this run that drift also stays under the bound. The testset
+# "fixed_point_solve!: the final Picard step" of test/integration/main_helpers.jl
+# catches it.
 const AGREE = 1e-8
 const SPREAD_STEPS = [24]
 const ROUNDOFF = 10 * eps()
