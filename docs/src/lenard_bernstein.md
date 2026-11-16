@@ -104,7 +104,7 @@ the conservation structure. Each step solves the fixed-point map
 ```
 
 by Picard iteration, optionally accelerated by Anderson mixing
-(`step_anderson!`) with damping decay and a stagnation-aware early exit. The
+(`step_fixed_point!`, with `GeometricSolvers`' `Anderson`). The
 projection–gradient–multiplier–update sequence is re-evaluated at the midpoint
 inside every iteration.
 

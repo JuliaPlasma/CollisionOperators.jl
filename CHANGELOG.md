@@ -15,31 +15,41 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 
 - **The `:anderson` solve runs on `GeometricSolvers`.** `step_fixed_point!` replaces
   `step_anderson!`: it solves the residual `F(v) = v − G(v)` of the Picard map with
-  `Anderson(Picard(; damping), m_anderson; restart_factor = 1e12)`, or with `Picard(; damping)`
-  for `use_anderson = false`, and stops when `‖F‖ ≤ max(tol·‖v₀‖, abs_floor)` at the predictor
-  `v₀`, or after `max_iter` iterations. A solve that does not converge warns; with Anderson it
-  keeps the iterate with the smallest residual. The final Picard update `G(v)` stays. The `iter`
-  column still counts Picard-map evaluations: one at the start, one or two per Anderson
-  iteration, and one for the final update; the `inner` column of `solver_stats_<suffix>.csv` holds the Anderson iterations instead
-  of the restart count. `scripts/anderson_port_check.jl` runs a short `parameters_sq_d04.jl` run
-  (`N_PARTICLES = 2000`, 50 steps) and writes per step the evaluations, the residual, the exit,
-  the momentum and energy drift and the distance to the solution of the old solver.
-  `scripts/anderson_port_check_before.csv` is that run with `step_anderson!` on base `a265f5a`,
-  written by the script's first version, which the shipped script cannot reproduce because it
-  calls `step_fixed_point!`; `scripts/anderson_port_check_after.csv` is the run with
-  `step_fixed_point!`.
+  `Anderson(Picard(; damping), m_anderson; restart_factor = 1e12)`, or with
+  `Picard(; damping)` for `use_anderson = false`, and stops when
+  `‖F‖ ≤ max(tol·‖v₀‖, abs_floor)` at the predictor `v₀`, or after `max_iter` iterations. A
+  solve that does not converge warns; with Anderson it keeps the iterate with the smallest
+  residual. The final Picard update `G(v)` stays. The `iter` column still counts Picard-map
+  evaluations: one at the start, one or two per Anderson iteration, and one for the final
+  update; the `inner` column of `solver_stats_<suffix>.csv` holds the Anderson iterations
+  instead of the restart count. `scripts/anderson_port_check.jl` runs a short
+  `parameters_sq_d04.jl` run (`N_PARTICLES = 2000`, 50 steps) and writes per step the
+  evaluations, the residual, the exit, the momentum and energy drift and the distance to the
+  solution of the old solver. `scripts/anderson_port_check_before.csv` is that run with
+  `step_anderson!` on base `a265f5a`, written by the script's first version, which the shipped
+  script cannot reproduce because it calls `step_fixed_point!`;
+  `scripts/anderson_port_check_after.csv` is the run with `step_fixed_point!`, and
+  `scripts/anderson_port_check_summary.txt` compares the two. In that run every step meets the
+  stop test, and each step solved from the old solver's start state agrees with the old
+  solution to `1e-8` relative, except the steps that the old solver left by stagnation (16, 20,
+  26, 32, 44) and step 24, on which both solves converge and differ by `4.7e-7`. The evaluations
+  total 1756 against 1482. `scripts/taylor_test.jl` and `scripts/exit_update_check.jl` call
+  `step_fixed_point!` too, and `exit_update_check.jl` counts a step as missed against the stop
+  test at the predictor. The pages of `docs/src/` that measure `step_anderson!` say so in a note
+  under their title.
 - CI uploads coverage from the `Julia 1 - ubuntu-latest` job instead of `Julia min`, and a test
   job saves the Julia cache only when it succeeds.
-- **The Julia floor is 1.12** (`491cde3`). `[compat]` declares `julia = "1.12"`, so a caller on
-  Julia 1.11 cannot install this version. The change is compat-only: the bound, and the CI that
-  targets it.
+- **The Julia floor is 1.13.** `[compat]` declares `julia = "1.13"`, so a caller on Julia 1.12
+  or older cannot install this version. It rose from 1.10 to 1.12 in `491cde3`, compat-only,
+  and from 1.12 to 1.13 because `GeometricSolvers`, which the `:anderson` solve now needs,
+  declares `julia = "1.13"`.
 
 ### New Features
 
 - **Jacobian-free Newton–Krylov solve for the implicit step** (`6d48033`). `--solver=newton`
-  selects `step_newton!`, which solves the same Picard fixed point as `step_anderson!` by inexact
-  Newton with a matrix-free GMRES modeled on Krylov.jl, Eisenstat–Walker forcing and Armijo
-  backtracking (`newton_krylov.jl`). New parameters: `solver` (default `:anderson`),
+  selects `step_newton!`, which solves the same Picard fixed point as the `:anderson` solve by
+  inexact Newton with a matrix-free GMRES modeled on Krylov.jl, Eisenstat–Walker forcing and
+  Armijo backtracking (`newton_krylov.jl`). New parameters: `solver` (default `:anderson`),
   `nk_krylov_max = 30`, `nk_eta_max = 0.9` and `nk_fd_rel = 0`, which picks the √eps of the
   collision kernel's precision as the finite-difference step. Both solvers share `tol`,
   `abs_floor` and `max_iter`, and the `iter` column counts Picard-map evaluations for both, so

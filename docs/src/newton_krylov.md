@@ -1,5 +1,8 @@
 # Newton–Krylov vs. Anderson
 
+*This page measures the earlier Anderson solver, `step_anderson!`, not
+`step_fixed_point!`, which runs the `:anderson` solve.*
+
 `step_newton!` solves the same implicit step as
 `step_anderson!`, the fixed point
 $v = \mathcal{G}(v)$ of the Picard map, but by Jacobian-free Newton–Krylov
