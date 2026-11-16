@@ -91,8 +91,9 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 ### Dependencies
 
 - **`GeometricSolvers` is a dependency.** It is not registered, so `Project.toml`,
-  `test/Project.toml` and `docs/Project.toml` take it from a `[sources]` git entry pinned to
-  commit `96b2540` of its `main`; `[compat]` bounds it at 0.1.
+  `test/Project.toml`, `docs/Project.toml` and the GPU image's `docker/Project.toml` take it
+  from a `[sources]` git entry pinned to commit `96b2540` of its `main`; `[compat]` bounds it at
+  0.1. `docker/Project.toml` declares `julia = "1.13"` as well.
 - `[compat]` now bounds every registered dependency instead of only `julia`: CairoMakie 0.15.12,
   DelimitedFiles 1.9.1, FileIO 1.19.0, ForwardDiff 1, Mantis 0.6 and PNGFiles 0.4.5.
   Until now the package carried no bound on any of them, so a resolve could pick a version whose
