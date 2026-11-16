@@ -42,7 +42,7 @@ function run_simulation(p::SimParameters; resume = nothing)
 
     # ---- State init: either fresh sample or resume from checkpoint ----
     cons_csv = "conservation_history_$(p.suffix).csv"
-    # Per-step solver cost: `inner` is the restart count (:anderson), Newton steps
+    # Per-step solver cost: `inner` is the Anderson or Picard iterations (:anderson), Newton steps
     # (:newton) or cheap inner maps (:defect); times in seconds, measured in process
     # (the log is block-buffered and cannot be used for timing).
     stats_csv = "solver_stats_$(p.suffix).csv"
@@ -83,7 +83,7 @@ function run_simulation(p::SimParameters; resume = nothing)
         # the migrated CSV, else assume DT never changed up to here.
         t_start = hasproperty(ckpt, :t) ? ckpt.t :
                   something(cons_time_at(cons_csv, start_step),
-                      start_step * p.DT)
+            start_step * p.DT)
 
         println("Resuming from step $start_step, t=$t_start " *
                 "(running through $(p.N_STEPS) at DT=$(p.DT))")
@@ -254,17 +254,12 @@ function run_simulation(p::SimParameters; resume = nothing)
                 w_particles, ws.bp1, ws.bp2, p.DT)
 
         iter, res_final, n_rs, r0_init = if p.solver === :anderson
-            step_anderson!(ws,
+            step_fixed_point!(ws,
                 v1, v_particles, w_particles, S0, p.DT,
                 v_mid, dv, dS_mid, G_eff, dot_v, f_buf,
-                r_vec, L_vec, G,
-                Gv, r_curr, r_prev, Gv_prev, v_old_buf, ΔF, ΔG;
+                r_vec, L_vec, G, Gv;
                 m = p.m_anderson, max_iter = p.max_iter, tol = p.tol,
                 abs_floor = p.abs_floor,
-                stag_window = p.stag_window,
-                stag_rel_tol = p.stag_rel_tol,
-                damp_decay_start = p.damp_decay_start,
-                damp_decay_factor = p.damp_decay_factor,
                 damping = p.damping, use_anderson = p.use_anderson,
                 use_gonzalez = p.use_gonzalez,
                 exit_picard_step = p.exit_picard_step,
@@ -347,7 +342,8 @@ function run_simulation(p::SimParameters; resume = nothing)
 
         step % 25 == 0 &&
             println("Step $step/$(p.N_STEPS)  iter=$iter  " *
-                    (p.solver === :anderson ? "rs=" : p.solver === :newton ? "newton=" : "inner=") *
+                    (p.solver === :anderson ? "outer=" :
+                     p.solver === :newton ? "newton=" : "inner=") *
                     "$n_rs" *
                     "  ‖r‖=$(round(res_final; sigdigits=3))" *
                     "  ‖f_s−f_p‖=$(round(fp_l2_history[end]; sigdigits=4))" *
@@ -416,7 +412,7 @@ function enable_gpu!(p::SimParameters)
             COLLISION_FN[] = getglobal(Main, :compute_collision_gpu32!)
         else
             COLLISION_FN[] = getglobal(Main, :compute_collision_gpu!)
-        COLLMETRIC_FN[] = getglobal(Main, :compute_collision_metric_gpu!)
+            COLLMETRIC_FN[] = getglobal(Main, :compute_collision_metric_gpu!)
         end
     end
     return nothing

@@ -2,7 +2,9 @@
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 CollisionOperators = "b58b20b1-6bfd-430a-a6d6-d2cc3899be11"
+GeometricSolvers = "3a2b8526-dde5-4630-ad43-3d2dcd69f118"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Mantis = "45fd81cf-4570-4cb4-b51d-06adeaefc15d"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SafeTestsets = "1bc83da4-3b8d-516f-aca4-4fe02f6d838f"
@@ -16,3 +18,4 @@ Test = "1"
 
 [sources]
 CollisionOperators = {path = ".."}
+GeometricSolvers = {url = "https://github.com/JuliaGNI/GeometricSolvers.jl", rev = "96b25402d93a331cf3854a7d979c82eadeeb03de"}

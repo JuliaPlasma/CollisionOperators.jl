@@ -13,6 +13,21 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 
 ### Changed
 
+- **The `:anderson` solve runs on `GeometricSolvers`.** `step_fixed_point!` replaces
+  `step_anderson!`: it solves the residual `F(v) = v − G(v)` of the Picard map with
+  `Anderson(Picard(; damping), m_anderson; restart_factor = 1e12)`, or with `Picard(; damping)`
+  for `use_anderson = false`, and stops when `‖F‖ ≤ max(tol·‖v₀‖, abs_floor)` at the predictor
+  `v₀`, or after `max_iter` Anderson iterations. A solve that does not converge keeps the iterate
+  with the smallest residual and warns. The final Picard update `G(v)` stays. The `iter` column
+  still counts Picard-map evaluations, now one or two per Anderson iteration plus the final
+  update; the `inner` column of `solver_stats_<suffix>.csv` holds the Anderson iterations instead
+  of the restart count. `scripts/anderson_port_check.jl` runs a short `parameters_sq_d04.jl` run
+  (`N_PARTICLES = 2000`, 50 steps) and writes per step the evaluations, the residual, the exit,
+  the momentum and energy drift and the distance to the solution of the old solver.
+  `scripts/anderson_port_check_before.csv` is that run with `step_anderson!` on base `a265f5a`,
+  written by the script's first version, which the shipped script cannot reproduce because it
+  calls `step_fixed_point!`; `scripts/anderson_port_check_after.csv` is the run with
+  `step_fixed_point!`.
 - CI uploads coverage from the `Julia 1 - ubuntu-latest` job instead of `Julia min`, and a test
   job saves the Julia cache only when it succeeds.
 - **The Julia floor is 1.12** (`491cde3`). `[compat]` declares `julia = "1.12"`, so a caller on
@@ -53,6 +68,10 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 
 ### Breaking Changes
 
+- **`stag_window`, `damp_decay_start` and `damp_decay_factor` are no longer parameters.** Only
+  `step_anderson!` read them: the stagnation exit and the damping decay after 200 iterations have
+  no counterpart in `GeometricSolvers`' `Anderson`. A preset that sets them raises an error; the
+  presets of this repository no longer do. `stag_rel_tol` stays, for `step_defect!`.
 - **Conservation CSV layout** (`1769872`). A 12th column `dt` holds each step's `DT`, with
   `cumsum(dt) == time`, and `time` is accumulated physical time. Code that rebuilds time as
   `step * DT` is wrong for any run whose `DT` changed. Legacy files are migrated in place on
@@ -61,6 +80,9 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
 
 ### Dependencies
 
+- **`GeometricSolvers` is a dependency.** It is not registered, so `Project.toml`,
+  `test/Project.toml` and `docs/Project.toml` take it from a `[sources]` git entry pinned to
+  commit `96b2540` of its `main`; `[compat]` bounds it at 0.1.
 - `[compat]` now bounds every registered dependency instead of only `julia`: CairoMakie 0.15.12,
   DelimitedFiles 1.9.1, FileIO 1.19.0, ForwardDiff 1, Mantis 0.6 and PNGFiles 0.4.5.
   Until now the package carried no bound on any of them, so a resolve could pick a version whose
