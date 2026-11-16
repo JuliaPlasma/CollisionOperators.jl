@@ -2,7 +2,7 @@
 
 ### K1 · The drift test of the port check does not catch a lost final Picard step.
 
-- **location:** `scripts/anderson_port_check.jl:151`
+- **location:** `scripts/anderson_port_check.jl:180`
 - **evidence:** with `if exit_picard_step` in `fixed_point_solve!` replaced by `if false`, the
   after-run's largest `|dP1|`, `|dP2|`, `|dE_rel|` are 2.08e-16, 4.25e-17, 1.80e-13. Each stays
   under `max(before, ROUNDOFF)` (`ROUNDOFF = 10 * eps()`), and the summary still reads "met". The

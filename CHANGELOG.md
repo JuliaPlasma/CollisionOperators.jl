@@ -31,8 +31,8 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
   `scripts/anderson_port_check_after.csv` is the run with `step_fixed_point!`, and
   `scripts/anderson_port_check_summary.txt` compares the two. In that run every step meets the
   stop test, and each step solved from the old solver's start state agrees with the old
-  solution to `1e-8` relative, except the steps that the old solver left by stagnation (16, 20,
-  26, 32, 44) and step 24, on which both solves converge and differ by `4.7e-7`. The evaluations
+  solution to `1e-8` relative, except five of the six steps that the old solver left by
+  stagnation (16, 20, 26, 32, 44; step 27 agrees to `5.3e-9`) and step 24, on which both solves converge and differ by `4.7e-7`. The evaluations
   total 1756 against 1482. `scripts/taylor_test.jl` and `scripts/exit_update_check.jl` call
   `step_fixed_point!` too, and `exit_update_check.jl` counts a step as missed against the stop
   test at the predictor. The pages of `docs/src/` that measure `step_anderson!` say so in a note

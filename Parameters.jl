@@ -78,7 +78,8 @@ Base.@kwdef struct SimParameters
     # Implicit solver: :anderson = Anderson-accelerated Picard from GeometricSolvers
     # (`step_fixed_point!`);
     # :newton = Jacobian-free Newton–Krylov (`step_newton!`). Both share `tol`,
-    # `abs_floor` and `max_iter` (a cap on Picard-map evaluations), and both log
+    # `abs_floor` and `max_iter` (a cap on the iterations of the method for
+    # :anderson, on Picard-map evaluations for :newton), and both log
     # evaluations in the `iter` column, so runs compare one-to-one.
     solver::Symbol = :anderson
     # :defect = defect correction around a frozen metric (`step_defect!`, Landau

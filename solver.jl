@@ -265,8 +265,9 @@ The solve succeeds when
 ``\lVert F(v) \rVert \le \max(\texttt{tol} \cdot \lVert v_0 \rVert, \texttt{abs\_floor})``,
 and stops after `max_iter` iterations of the method. A solve that ends with a code other
 than `SUCCESS` warns and returns; `Anderson` then keeps the iterate with the smallest
-``\lVert F \rVert`` seen, `Picard` its last iterate. `abs_floor` caps how tight the solve is asked to be: below the numerical noise
-floor of the Picard map the extra iterations buy nothing.
+``\lVert F \rVert`` seen, `Picard` its last iterate. `abs_floor` caps how tight the solve
+is asked to be: below the numerical noise floor of the Picard map the extra iterations buy
+nothing.
 
 With `exit_picard_step = true` (the default) `v1` leaves holding ``\mathcal{G}(v)`` for
 the returned iterate ``v``, one more evaluation of the map. That final Picard update is
@@ -478,9 +479,10 @@ Each ``\Phi_k`` evaluation needs ``G_\text{eff}`` ([`landau_geff!`](@ref)) but n
 The solve stops when the outer residual ``\lVert \mathcal{G}(v) - v \rVert`` falls below
 ``\max(\texttt{tol} \cdot \lVert v \rVert, \texttt{abs\_floor})``, and the exit returns
 ``\mathcal{G}(v)`` computed with the antisymmetric pair sum, so momentum and energy are
-conserved exactly as in `step_fixed_point!`. Every `stag_window` outer
-iterations (`main.jl` passes `p.dc_stag_window`), a best residual that fell by less than `stag_rel_tol` ends the solve with
-the best ``\mathcal{G}(v)``. `max_iter` caps the outer iterations.
+conserved exactly as in `step_fixed_point!`. Every `stag_window` outer iterations
+(`main.jl` passes `p.dc_stag_window`), a best residual that fell by less than
+`stag_rel_tol` ends the solve with the best ``\mathcal{G}(v)``. `max_iter` caps the outer
+iterations.
 
 Measured (N = 40k, FP64, RTX 3080 probe): 6–11 outer iterations per step against
 10–120 Anderson iterations, each ``\Phi_k`` costing about 2 % of a full map. In FP32 the
