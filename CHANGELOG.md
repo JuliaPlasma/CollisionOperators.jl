@@ -17,10 +17,10 @@ This file was started on 2026-08-31. Nothing has been released yet — there are
   `step_anderson!`: it solves the residual `F(v) = v − G(v)` of the Picard map with
   `Anderson(Picard(; damping), m_anderson; restart_factor = 1e12)`, or with `Picard(; damping)`
   for `use_anderson = false`, and stops when `‖F‖ ≤ max(tol·‖v₀‖, abs_floor)` at the predictor
-  `v₀`, or after `max_iter` Anderson iterations. A solve that does not converge keeps the iterate
-  with the smallest residual and warns. The final Picard update `G(v)` stays. The `iter` column
-  still counts Picard-map evaluations, now one or two per Anderson iteration plus the final
-  update; the `inner` column of `solver_stats_<suffix>.csv` holds the Anderson iterations instead
+  `v₀`, or after `max_iter` iterations. A solve that does not converge warns; with Anderson it
+  keeps the iterate with the smallest residual. The final Picard update `G(v)` stays. The `iter`
+  column still counts Picard-map evaluations: one at the start, one or two per Anderson
+  iteration, and one for the final update; the `inner` column of `solver_stats_<suffix>.csv` holds the Anderson iterations instead
   of the restart count. `scripts/anderson_port_check.jl` runs a short `parameters_sq_d04.jl` run
   (`N_PARTICLES = 2000`, 50 steps) and writes per step the evaluations, the residual, the exit,
   the momentum and energy drift and the distance to the solution of the old solver.

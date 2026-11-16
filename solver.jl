@@ -264,8 +264,8 @@ keeps its restart on residual growth off in practice; with `use_anderson = false
 The solve succeeds when
 ``\lVert F(v) \rVert \le \max(\texttt{tol} \cdot \lVert v_0 \rVert, \texttt{abs\_floor})``,
 and stops after `max_iter` iterations of the method. A solve that ends with a code other
-than `SUCCESS` keeps the iterate with the smallest ``\lVert F \rVert`` seen, warns, and
-returns. `abs_floor` caps how tight the solve is asked to be: below the numerical noise
+than `SUCCESS` warns and returns; `Anderson` then keeps the iterate with the smallest
+``\lVert F \rVert`` seen, `Picard` its last iterate. `abs_floor` caps how tight the solve is asked to be: below the numerical noise
 floor of the Picard map the extra iterations buy nothing.
 
 With `exit_picard_step = true` (the default) `v1` leaves holding ``\mathcal{G}(v)`` for

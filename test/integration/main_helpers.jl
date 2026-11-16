@@ -199,7 +199,8 @@ end
         picard_map!(ws, out, v, v0, w, S0, p.DT, bufs...; use_gonzalez)
         return out
     end
-    # The fixed points with and without the Gonzalez term are about 3e-3 apart.
+    # At the fixed point with one choice of the Gonzalez term, the residual of
+    # that map is about 1e-12 and the residual of the other map about 3e-3.
     for use_gonzalez in (true, false)
         v1 = copy(v0)
         _, res, _, res0 = step_fixed_point!(ws, v1, v0, w, S0, p.DT, bufs..., zeros(N, 2);
