@@ -1,0 +1,9 @@
+evaluations, total: before 1482, after 1756
+exit on the residual: before 44 of 50, after 50 of 50
+before-run stagnation steps: 16, 20, 26, 27, 32, 44
+steps with ‖r‖ ≥ target after: 0
+steps with rel_step > 1e-08: 16, 20, 24, 26, 32, 44
+exempt by name: 16, 20, 24, 26, 27, 32, 44
+max |dP1|, |dP2|, |dE_rel|: before 1.73e-16, 2.21e-17, 1.59e-10
+max |dP1|, |dP2|, |dE_rel|: after  3.40e-16, 2.52e-17, 4.08e-15
+agreement, stop test and drift: met

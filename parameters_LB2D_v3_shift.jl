@@ -14,8 +14,7 @@ PARAMS = SimParameters(
     damping = 0.7, m_anderson = 8,
     tol = 1e-12, max_iter = 2000,
     abs_floor = 1e-10,
-    stag_window = 30, stag_rel_tol = 0.1,
-    damp_decay_start = 200, damp_decay_factor = 0.5,
+    stag_rel_tol = 0.1,
     snap_every = 50,
     suffix = "LB2D_v3_shift",
     seed = 42

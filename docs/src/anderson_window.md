@@ -1,5 +1,8 @@
 # The Anderson window update
 
+*This page measures the earlier Anderson solver, `step_anderson!`, not
+`step_fixed_point!`, which runs the `:anderson` solve.*
+
 The Anderson acceleration in [`step_anderson!`](https://github.com/junyixu/CollisionOperators.jl/blob/main/solver.jl)
 keeps the last ``m`` residual and map differences in two dense buffers, ``\Delta F``
 and ``\Delta G``, each of size ``2N \times m``. Every iteration contributes one new

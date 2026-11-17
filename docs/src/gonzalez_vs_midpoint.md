@@ -1,5 +1,8 @@
 # Gonzalez vs. plain midpoint: entropy in FP32 and FP64
 
+*This page measures the earlier Anderson solver, `step_anderson!`, not
+`step_fixed_point!`, which runs the `:anderson` solve.*
+
 `use_gonzalez` switches the discrete gradient of the implicit step between the
 Gonzalez form and the plain implicit midpoint rule (see `picard_map!` in
 [`solver.jl`](https://github.com/junyixu/CollisionOperators.jl/blob/main/solver.jl)).

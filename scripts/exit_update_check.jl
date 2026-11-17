@@ -1,15 +1,16 @@
 # Does the solvers' exit update v1 = G(x_best) help or hurt on steps that stop
 # above the target?
 #
-# step_anderson! (and step_newton!) return G(x_best) but report ‖F(x_best)‖.
+# step_fixed_point! (and step_newton!) return G(x_best) but report ‖F(x_best)‖.
 # One extra evaluation of ‖F(G(x_best))‖ settles it:
 #   ratio = ‖F(G(x_best))‖ / ‖F(x_best)‖  > 1  ⇒ the exit update makes the state worse
 # On missed steps also ‖J û‖ along û = F(v1)/‖F(v1)‖ (central difference): ≈ 1 means
 # a benign direction, ≫ 1 the stiff direction of scripts/taylor_test.jl.
 #
-# Advances the step-1500 sq_d04 state with Anderson exactly as run_simulation
-# does (CPU FP64, DT = 0.005, preset knobs, abs_floor = 1e-10 — the FP64
-# configuration that missed the target on 11 of 50 steps on a GPU).
+# Advances the step-1500 sq_d04 state with step_fixed_point! exactly as
+# run_simulation does (CPU FP64, DT = 0.005, preset knobs, abs_floor = 1e-10).
+# A step misses when ‖F(x_best)‖ exceeds the stop test
+# max(tol·‖v_pred‖, abs_floor) at the explicit-Euler predictor v_pred.
 #
 #   julia -t auto --project=. scripts/exit_update_check.jl . <ckpt.jls> [n_steps=30]
 
@@ -31,12 +32,16 @@ N = size(v, 1)
 dt = p.DT
 
 f_coeffs = zeros(ws.n_dofs)
-r_vec = zeros(ws.n_dofs); L_vec = zeros(ws.n_dofs)
-G = zeros(N, 2); dot_v = zeros(N, 2); Gv = zeros(N, 2)
-v_mid = similar(v); dvb = similar(v); dS_mid = zeros(N, 2); G_eff = zeros(N, 2)
+r_vec = zeros(ws.n_dofs)
+L_vec = zeros(ws.n_dofs)
+G = zeros(N, 2)
+dot_v = zeros(N, 2)
+Gv = zeros(N, 2)
+v_mid = similar(v)
+dvb = similar(v)
+dS_mid = zeros(N, 2)
+G_eff = zeros(N, 2)
 f_buf = zeros(ws.n_dofs)
-bufs = (zeros(N, 2), zeros(N, 2), zeros(N, 2), zeros(N, 2),
-    zeros(2N, p.m_anderson), zeros(2N, p.m_anderson))
 
 function F!(out, x, v0, S0)
     picard_map!(ws, Gv, reshape(x, N, 2), v0, w, S0, dt,
@@ -46,8 +51,10 @@ function F!(out, x, v0, S0)
     return out
 end
 
-@printf("%5s %6s %11s %13s %7s %8s\n", "step", "evals", "‖F(x_best)‖", "‖F(G(x_best))‖", "ratio", "‖Jû‖")
-ratios_missed = Float64[]; ratios_conv = Float64[]
+@printf("%5s %6s %11s %13s %7s %8s\n",
+    "step", "evals", "‖F(x_best)‖", "‖F(G(x_best))‖", "ratio", "‖Jû‖")
+ratios_missed = Float64[]
+ratios_conv = Float64[]
 for step in 1:NSTEPS
     l2_project!(ws, f_coeffs, v, w)
     f_s = build_field(ws, f_coeffs)
@@ -58,21 +65,20 @@ for step in 1:NSTEPS
     compute_collision!(ws, dot_v, v, w, G)
     v1 = v .+ dt .* dot_v
     v0 = copy(v)
+    target = max(p.tol * norm(v1), p.abs_floor)   # the stop test, at the predictor
 
-    it, nrm_best, _, _ = step_anderson!(ws, v1, v0, w, S0, dt,
-        v_mid, dvb, dS_mid, G_eff, dot_v, f_buf, r_vec, L_vec, G, Gv, bufs...;
+    it, nrm_best, _, _ = step_fixed_point!(ws, v1, v0, w, S0, dt,
+        v_mid, dvb, dS_mid, G_eff, dot_v, f_buf, r_vec, L_vec, G, Gv;
         m = p.m_anderson, max_iter = p.max_iter, tol = p.tol, abs_floor = p.abs_floor,
-        stag_window = p.stag_window, stag_rel_tol = p.stag_rel_tol,
-        damp_decay_start = p.damp_decay_start, damp_decay_factor = p.damp_decay_factor,
         damping = p.damping, use_gonzalez = p.use_gonzalez,
+        use_anderson = p.use_anderson,
         exit_picard_step = true)   # the default: return G(x_best)
 
     x = vec(copy(v1))
     Fx = F!(similar(x), x, v0, S0)
     nrm_after = norm(Fx)
     ratio = nrm_after / nrm_best
-    target = max(p.tol * norm(x), p.abs_floor)
-    missed = nrm_best ≥ target
+    missed = nrm_best > target
     Ju = NaN
     if missed
         u = Fx ./ nrm_after
@@ -92,5 +98,6 @@ end
 
 med(a) = isempty(a) ? NaN : sort(a)[cld(length(a), 2)]
 @printf("\nmissed steps:    %d, median ratio %.2f, range %s\n", length(ratios_missed),
-    med(ratios_missed), isempty(ratios_missed) ? "-" : string(extrema(round.(ratios_missed; digits = 2))))
+    med(ratios_missed),
+    isempty(ratios_missed) ? "-" : string(extrema(round.(ratios_missed; digits = 2))))
 @printf("converged steps: %d, median ratio %.2f\n", length(ratios_conv), med(ratios_conv))

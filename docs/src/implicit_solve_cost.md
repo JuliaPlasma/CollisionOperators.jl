@@ -1,5 +1,8 @@
 # Cost of the implicit solve
 
+*This page measures the earlier Anderson solver, `step_anderson!`, not
+`step_fixed_point!`, which runs the `:anderson` solve.*
+
 The implicit midpoint step is solved by Anderson-accelerated Picard iteration
 (`step_anderson!`), and every iteration re-evaluates the projection, the
 log-gradient and — for Landau — the $O(N^2)$ collision sum. Wall time is

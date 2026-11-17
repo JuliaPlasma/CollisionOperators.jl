@@ -36,9 +36,15 @@ l2_project!(ws, f_coeffs, v0, w)
 f_s = build_field(ws, f_coeffs)
 S0 = compute_entropy(ws, f_s)
 
-r_vec = zeros(ws.n_dofs); L_vec = zeros(ws.n_dofs)
-G = zeros(N, 2); dot_v = zeros(N, 2); Gv = zeros(N, 2)
-v_mid = similar(v0); dvb = similar(v0); dS_mid = zeros(N, 2); G_eff = zeros(N, 2)
+r_vec = zeros(ws.n_dofs)
+L_vec = zeros(ws.n_dofs)
+G = zeros(N, 2)
+dot_v = zeros(N, 2)
+Gv = zeros(N, 2)
+v_mid = similar(v0)
+dvb = similar(v0)
+dS_mid = zeros(N, 2)
+G_eff = zeros(N, 2)
 f_buf = zeros(ws.n_dofs)
 
 const NEVAL = Ref(0)
@@ -58,16 +64,14 @@ compute_G!(ws, G, v0, L_vec)
 compute_collision!(ws, dot_v, v0, w, G)
 v_pred = vec(v0 .+ dt .* dot_v)
 
-# Converged point: Anderson to the FP64 target.
+# Converged point: Anderson to the FP64 target. `max_iter` caps the iterations of
+# the method, not the map evaluations that `it` counts.
 v_star = reshape(copy(v_pred), N, 2)
 t0 = time()
-it, res, _, r0 = step_anderson!(ws, v_star, v0, w, S0, dt,
-    v_mid, dvb, dS_mid, G_eff, dot_v, f_buf, r_vec, L_vec, G,
-    Gv, zeros(N, 2), zeros(N, 2), zeros(N, 2), zeros(N, 2),
-    zeros(2N, p.m_anderson), zeros(2N, p.m_anderson);
+it, res, _, r0 = step_fixed_point!(ws, v_star, v0, w, S0, dt,
+    v_mid, dvb, dS_mid, G_eff, dot_v, f_buf, r_vec, L_vec, G, Gv;
     m = p.m_anderson, max_iter = 300, tol = 1e-12, abs_floor = 1e-11,
-    stag_window = 30, stag_rel_tol = 0.1, damping = p.damping,
-    use_gonzalez = GONZ)
+    damping = p.damping, use_gonzalez = GONZ)
 @printf("gonzalez=%s  Anderson: %d evals, ‖F‖ %.2e → %.2e  (%.2f s/eval)\n",
     GONZ, it, r0, res, (time() - t0) / it)
 v_star = vec(v_star)
@@ -75,10 +79,12 @@ v_star = vec(v_star)
 function taylor(label, v, u)
     u = u / norm(u)
     Fv = F!(similar(v), v)
-    Fp = similar(v); Fm = similar(v)
+    Fp = similar(v)
+    Fm = similar(v)
     Ju = Dict{Float64, Vector{Float64}}()
     for h in (1e-4, 1e-6)
-        F!(Fp, v .+ h .* u); F!(Fm, v .- h .* u)
+        F!(Fp, v .+ h .* u)
+        F!(Fm, v .- h .* u)
         Ju[h] = (Fp .- Fm) ./ (2h)
     end
     J = Ju[1e-6]
@@ -90,7 +96,8 @@ function taylor(label, v, u)
         F!(Fp, v .+ ε .* u)
         r = norm(Fp .- Fv .- ε .* J)
         slope = prev === nothing ? NaN : log10(prev / r)
-        @printf("%10.0e %12.3e %12.3e %10.2e %8.2f\n", ε, r, r / ε^2, r / (ε * norm(J)), slope)
+        @printf("%10.0e %12.3e %12.3e %10.2e %8.2f\n", ε, r, r / ε^2, r / (ε * norm(J)),
+            slope)
         prev = r
     end
 end

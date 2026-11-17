@@ -1,5 +1,8 @@
 # Defect correction vs. Anderson
 
+*This page measures the earlier Anderson solver, `step_anderson!`, not
+`step_fixed_point!`, which runs the `:anderson` solve.*
+
 This page compares three ways of solving the implicit Landau step in FP64:
 
 1. **Anderson** from the explicit Euler predictor: the production solver (`step_anderson!`).

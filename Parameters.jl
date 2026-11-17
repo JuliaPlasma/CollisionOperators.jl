@@ -68,17 +68,18 @@ Base.@kwdef struct SimParameters
     m_anderson::Int = 8
     tol::Float64 = 1e-12   # relative tol on ‖r‖ / ‖v‖
     max_iter::Int = 2000
-    # Anderson convergence safety net (see `step_anderson!` doc-comment):
+    # Floor of the stop test (see `fixed_point_solve!`):
     abs_floor::Float64 = 1e-7   # cap on effective tol — past this, asking
     # for less is pointless (Picard noise floor)
-    stag_window::Int = 50     # iters between stagnation checks
-    stag_rel_tol::Float64 = 0.01   # < 1% drop in `nrm_best` over window ⇒ exit
-    damp_decay_start::Int = 200    # iter index after which damping is decayed
-    damp_decay_factor::Float64 = 0.5  # damping multiplier once decay starts
+    # Stagnation exit of `step_defect!`: a < 1% drop in the best outer residual
+    # over `dc_stag_window` outer iterations ends the solve.
+    stag_rel_tol::Float64 = 0.01
 
-    # Implicit solver: :anderson = Anderson-accelerated Picard (`step_anderson!`);
+    # Implicit solver: :anderson = Anderson-accelerated Picard from GeometricSolvers
+    # (`step_fixed_point!`);
     # :newton = Jacobian-free Newton–Krylov (`step_newton!`). Both share `tol`,
-    # `abs_floor` and `max_iter` (a cap on Picard-map evaluations), and both log
+    # `abs_floor` and `max_iter` (a cap on the iterations of the method for
+    # :anderson, on Picard-map evaluations for :newton), and both log
     # evaluations in the `iter` column, so runs compare one-to-one.
     solver::Symbol = :anderson
     # :defect = defect correction around a frozen metric (`step_defect!`, Landau
